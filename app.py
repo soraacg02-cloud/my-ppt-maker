@@ -3,7 +3,8 @@ from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.enum.text import PP_ALIGN
 from pptx.dml.color import RGBColor
-from pptx.enum.shapes import MSO_SHAPE_TYPE
+# 修正點：同時引入 MSO_SHAPE (畫形狀用) 和 MSO_SHAPE_TYPE (辨識圖片用)
+from pptx.enum.shapes import MSO_SHAPE, MSO_SHAPE_TYPE
 from io import BytesIO
 
 # --- 設定網頁標題 ---
@@ -24,7 +25,7 @@ def extract_data_from_pptx(uploaded_pptx):
     """
     try:
         prs = Presentation(uploaded_pptx)
-        # 預設只讀取第一張投影片 (通常原始資料是一頁一案)
+        # 預設只讀取第一張投影片
         slide = prs.slides[0]
         
         extracted_img = None
@@ -32,13 +33,13 @@ def extract_data_from_pptx(uploaded_pptx):
 
         # 遍歷所有物件
         for shape in slide.shapes:
-            # 1. 抓取圖片 (Shape Type 13 = PICTURE)
+            # 1. 抓取圖片 (使用 MSO_SHAPE_TYPE.PICTURE)
             if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
-                # 只抓第一張找到的圖片 (假設最大那張就是主要的圖)
+                # 只抓第一張找到的圖片
                 if extracted_img is None:
                     extracted_img = shape.image.blob
             
-            # 2. 抓取文字 (如果有 Text Frame)
+            # 2. 抓取文字
             if shape.has_text_frame:
                 for paragraph in shape.text_frame.paragraphs:
                     if paragraph.text.strip():
@@ -54,7 +55,7 @@ def extract_data_from_pptx(uploaded_pptx):
 with st.sidebar:
     st.header("1. 上傳原始資料")
     
-    # 修改：上傳 PPTX 檔案
+    # 上傳 PPTX 檔案
     uploaded_file = st.file_uploader(
         "上傳原始 PPT 檔案 (.pptx)", 
         type=['pptx'], 
@@ -93,7 +94,7 @@ with st.sidebar:
     if st.button("➕ 加入此頁到簡報", type="primary"):
         if case_info and problem and spirit and key_point:
             
-            # 圖片處理：優先使用從 PPT 抓到的圖
+            # 圖片處理
             image_data_to_save = ppt_image_blob
             image_name_str = uploaded_file.name if uploaded_file else "無圖片"
 
@@ -141,7 +142,7 @@ else:
 
     st.divider()
 
-    # --- PPT 生成邏輯 (保持不變，負責排版) ---
+    # --- PPT 生成邏輯 ---
     def generate_ppt(slides_data):
         prs = Presentation()
         prs.slide_width = Inches(13.333)
@@ -181,7 +182,8 @@ else:
 
             # 4. 重點 (底部黃底)
             left, top, width, height = Inches(0.5), Inches(6.5), Inches(12.3), Inches(0.8)
-            shape = slide.shapes.add_shape(MSO_SHAPE_TYPE.RECTANGLE, left, top, width, height)
+            # 修正點：這裡改回使用 MSO_SHAPE.RECTANGLE
+            shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
             shape.fill.solid()
             shape.fill.fore_color.rgb = RGBColor(255, 192, 0)
             shape.line.color.rgb = RGBColor(255, 192, 0)
