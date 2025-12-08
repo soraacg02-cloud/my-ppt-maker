@@ -15,9 +15,9 @@ import re
 import pandas as pd
 
 # --- 設定網頁標題 ---
-st.set_page_config(page_title="PPT 重組生成器", page_icon="📑", layout="wide")
-st.title("📑 PPT 重組生成器")
-st.caption("⚠️提醒：PDF功能 還無法使用")
+st.set_page_config(page_title="PPT 重組生成器 (分頁修復版)", page_icon="📑", layout="wide")
+st.title("📑 PPT 重組生成器 (精準分頁版)")
+st.caption("提醒：PDF功能 還無法使用")
 
 # === NBLM 提示詞區塊 ===
 nblm_prompt = """根據上傳的所有來源，分開整理出以下重點(不要表格)：
