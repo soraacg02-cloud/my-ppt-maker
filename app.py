@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.enum.text import PP_ALIGN
@@ -14,9 +15,83 @@ import re
 import pandas as pd
 
 # --- 設定網頁標題 ---
-st.set_page_config(page_title="PPT 重組生成器 (簡潔版)", page_icon="📑", layout="wide")
+st.set_page_config(page_title="PPT 重組生成器 (顯眼複製版)", page_icon="📑", layout="wide")
 st.title("📑 PPT 重組生成器 (完整版)")
 st.caption("支援多檔上傳、自動排序 (申請人 -> 日期)、表格讀取與錯誤診斷。")
+
+# === NBLM 提示詞區塊 (使用 HTML/JS 製作免安裝的顯眼按鈕) ===
+nblm_prompt = """根據上傳的所有來源，分開整理出以下重點(不要表格)：
+
+1. 案號 / 日期 / 公司 (案號依據"公開號"、日期依據"優先權日"、公司依據"申請人")
+2. 解決問題
+3. 發明精神(不要有公式)
+4. 一句重點(用來描述發明特徵重點，20字)
+5. 代表圖：(根據發明精神建議3張最可以說明發明精神的圖片，範例:FIG.3)"""
+
+st.info("💡 **NBLM 使用提示詞** (點擊下方綠色按鈕即可一鍵複製)")
+
+# 使用 HTML 建立一個大按鈕和文字框
+components.html(
+    f"""
+    <html>
+    <head>
+    <meta charset="utf-8">
+    </head>
+    <body style="font-family: sans-serif; margin: 0; padding: 0;">
+        <div style="display: flex; flex-direction: column; align-items: flex-start;">
+            <textarea id="copyTarget" style="opacity: 0; position: absolute; z-index: -1;">{nblm_prompt}</textarea>
+            
+            <div style="
+                background-color: #f0f2f6; 
+                padding: 15px; 
+                border-radius: 10px; 
+                white-space: pre-wrap; 
+                font-size: 14px; 
+                color: #31333F; 
+                border: 1px solid #d6d6d6;
+                width: 95%;
+                margin-bottom: 10px;">{nblm_prompt}</div>
+
+            <button onclick="copyFunction()" style="
+                background-color: #00CC66; 
+                color: white; 
+                border: none; 
+                padding: 12px 24px; 
+                text-align: center; 
+                text-decoration: none; 
+                display: inline-block; 
+                font-size: 16px; 
+                font-weight: bold;
+                border-radius: 8px; 
+                cursor: pointer; 
+                box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+                transition: background-color 0.3s;">
+                📋 點我一鍵複製提示詞
+            </button>
+            <span id="statusParams" style="color: #00CC66; font-weight: bold; margin-left: 10px; opacity: 0; transition: opacity 0.5s;">✅ 複製成功！</span>
+        </div>
+
+        <script>
+        function copyFunction() {{
+            var copyText = document.getElementById("copyTarget");
+            copyText.select();
+            copyText.setSelectionRange(0, 99999); 
+            navigator.clipboard.writeText(copyText.value).then(function() {{
+                var status = document.getElementById("statusParams");
+                status.style.opacity = '1';
+                setTimeout(function(){{ status.style.opacity = '0'; }}, 2000);
+            }}, function(err) {{
+                alert("複製失敗，請手動複製");
+            }});
+        }}
+        </script>
+    </body>
+    </html>
+    """,
+    height=280 # 設定區塊高度
+)
+st.divider()
+# ==========================================
 
 # --- 初始化 Session State ---
 if 'slides_data' not in st.session_state:
@@ -44,7 +119,6 @@ def extract_specific_figure_from_pdf(pdf_stream, target_fig_text):
     try:
         doc = fitz.open(stream=pdf_stream, filetype="pdf")
         
-        # 智慧提取圖號 Regex
         pattern = re.compile(r'((?:FIG\.?|Figure|圖)\s*[0-9]+[A-Za-z]*)', re.IGNORECASE)
         
         search_keywords = []
@@ -106,7 +180,7 @@ def extract_company_for_sort(text):
     lines = text.split('\n')
     for line in lines:
         if "公司" in line or "申請人" in line:
-            if "案號" in line and "日期" in line: # 跳過標題行
+            if "案號" in line and "日期" in line: 
                 continue
             return line.replace("公司", "").replace("申請人", "").replace("：", "").replace(":", "").strip()
     return "ZZZ"
@@ -139,7 +213,6 @@ def parse_word_file(uploaded_docx):
                                 all_lines.append(p.text.strip())
         
         for text in all_lines:
-            # A. 新案件判斷
             if "案號" in text or "索號" in text:
                 if current_case["case_info"] and current_field != "case_info_block":
                     if not current_case["problem"]: current_case["missing_fields"].append("解決問題")
@@ -164,7 +237,6 @@ def parse_word_file(uploaded_docx):
                 current_case["sort_company"] = extract_company_for_sort(text)
                 continue
 
-            # B. 欄位切換
             if "解決問題" in text:
                 current_field = "problem"
                 content = re.sub(r'^[0-9.．]*\s*解決問題[:：]?\s*', '', text)
@@ -186,7 +258,6 @@ def parse_word_file(uploaded_docx):
                 current_case["rep_fig_text"] = content
                 continue
 
-            # C. 內容填充
             if current_field == "case_info_block":
                 current_case["case_info"] += "\n" + text
                 if current_case["sort_date"] == "99999999":
@@ -209,7 +280,6 @@ def parse_word_file(uploaded_docx):
             elif current_field == "key_point":
                 current_case["key_point"] += "\n" + text
 
-        # 存最後一筆
         if current_case["case_info"]:
             if not current_case["problem"]: current_case["missing_fields"].append("解決問題")
             if not current_case["spirit"]: current_case["missing_fields"].append("發明精神")
@@ -232,12 +302,10 @@ with st.sidebar:
         all_cases = []
         status_report_list = []
         
-        # 1. 處理 Word
         for word_file in word_files:
             cases = parse_word_file(word_file)
             all_cases.extend(cases)
         
-        # 2. 準備 PDF
         pdf_file_map = {}
         if pdf_files:
             for pdf in pdf_files:
@@ -290,7 +358,6 @@ with st.sidebar:
                 
                 status_report_list.append(status)
 
-        # 3. 排序 (公司/申請人 A-Z -> 日期早到晚)
         all_cases.sort(key=lambda x: (x["sort_company"].upper(), x["sort_date"]))
         status_report_list.sort(key=lambda x: (x["申請人/公司"].upper(), x["日期"]))
 
@@ -310,9 +377,8 @@ with st.sidebar:
 
 # --- 主畫面 ---
 if not st.session_state['slides_data']:
-    st.info("👈 請先在左側上傳檔案。")
+    st.info("👈 請上傳檔案。")
 else:
-    # 1. 簡報預覽
     st.subheader(f"📋 簡報預覽 (已排序)")
     cols = st.columns(3)
     for i, data in enumerate(st.session_state['slides_data']):
@@ -330,7 +396,6 @@ else:
                     st.warning(f"無圖片，將填入文字：\n{display_text[:50]}...")
                 st.caption(f"重點：{data['key_point']}")
 
-    # PPT 下載
     def generate_ppt(slides_data):
         prs = Presentation()
         prs.slide_width = Inches(13.333)
@@ -338,7 +403,6 @@ else:
         for data in slides_data:
             slide = prs.slides.add_slide(prs.slide_layouts[6])
 
-            # 左上
             left, top, width, height = Inches(0.5), Inches(0.5), Inches(5.0), Inches(2.0)
             txBox = slide.shapes.add_textbox(left, top, width, height)
             tf = txBox.text_frame
@@ -352,7 +416,6 @@ else:
                     p.font.bold = True
                     p.alignment = PP_ALIGN.LEFT
 
-            # 右上
             img_left = Inches(5.5)
             img_top = Inches(0.5)
             img_height = Inches(4.0)
@@ -374,7 +437,6 @@ else:
                         p.font.size = Pt(16)
                         p.alignment = PP_ALIGN.LEFT
 
-            # 中下 & 底部
             left, top, width, height = Inches(0.5), Inches(4.8), Inches(12.3), Inches(1.5)
             txBox = slide.shapes.add_textbox(left, top, width, height)
             tf = txBox.text_frame
@@ -408,7 +470,6 @@ else:
         binary_output.seek(0)
         st.download_button("📥 下載 PPT", binary_output, "final_slides.pptx")
 
-    # 2. 診斷表格 (最下面)
     st.divider()
     st.subheader("📊 處理結果診斷報告")
     if st.session_state['status_report']:
