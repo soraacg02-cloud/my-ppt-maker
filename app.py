@@ -15,9 +15,9 @@ import re
 import pandas as pd
 
 # --- 設定網頁標題 ---
-st.set_page_config(page_title="PPT 重組生成器 (分頁修復版)", page_icon="📑", layout="wide")
-st.title("📑 PPT 重組生成器 (精準分頁版)")
-st.caption("修正：解決因內文包含 'claim X' 導致錯誤分頁的問題，確保每組獨立項完整呈現於一頁。")
+st.set_page_config(page_title="PPT 重組生成器", page_icon="📑", layout="wide")
+st.title("📑 PPT 重組生成器")
+st.caption("⚠️提醒：PDF功能 還無法使用")
 
 # === NBLM 提示詞區塊 ===
 nblm_prompt = """根據上傳的所有來源，分開整理出以下重點(不要表格)：
@@ -29,7 +29,7 @@ nblm_prompt = """根據上傳的所有來源，分開整理出以下重點(不�
 5. 代表圖：*(根據發明精神建議3張最可以說明發明精神的圖片，範例:FIG.3)
 6. 獨立項claim： *(分組且分行條列式+對應的代表圖，claim要(1)有位階縮排 (2)claim的元件要有標號 (3)對應的claim號碼)"""
 
-st.info("💡 **NBLM 使用提示詞** (已更新，點擊下方綠色按鈕一鍵複製)")
+st.info("💡 **NBLM 使用提示詞** (點擊下方綠色按鈕一鍵複製)")
 
 components.html(
     f"""
