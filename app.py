@@ -11,15 +11,18 @@ from docx.text.paragraph import Paragraph
 from docx.table import Table
 import fitz  # PyMuPDF
 import re
+import pandas as pd # 新增 pandas 用於顯示錯誤報告表格
 
 # --- 設定網頁標題 ---
-st.set_page_config(page_title="PPT 重組生成器 (除錯最終版)", page_icon="📑", layout="wide")
-st.title("📑 PPT 重組生成器 (邏輯重構版)")
-st.caption("重構：採用平鋪式迴圈處理，並新增「單案歷程」以追蹤文字歸類狀況。")
+st.set_page_config(page_title="PPT 重組生成器 (排序與診斷版)", page_icon="📑", layout="wide")
+st.title("📑 PPT 重組生成器 (排序 + 錯誤診斷版)")
+st.caption("升級：支援多 Word 上傳、依照「公司 -> 日期」自動排序，並提供詳細錯誤原因分析。")
 
 # --- 初始化 Session State ---
 if 'slides_data' not in st.session_state:
     st.session_state['slides_data'] = []
+if 'status_report' not in st.session_state:
+    st.session_state['status_report'] = []
 
 # --- 輔助函數：遍歷 Word 所有區塊 (含表格) ---
 def iter_block_items(parent):
@@ -36,7 +39,7 @@ def iter_block_items(parent):
 # --- 函數：依據關鍵字搜尋 PDF 並截圖 ---
 def extract_specific_figure_from_pdf(pdf_stream, target_fig_text):
     if not target_fig_text:
-        return None, "無文字"
+        return None, "Word 中未指定代表圖文字"
 
     try:
         doc = fitz.open(stream=pdf_stream, filetype="pdf")
@@ -53,6 +56,7 @@ def extract_specific_figure_from_pdf(pdf_stream, target_fig_text):
                 clean_keyword = raw_keyword.replace(" ", "").upper()
                 search_keywords.append(clean_keyword)
         
+        # 備用方案：如果 Regex 沒抓到，取第一行前10字
         if not search_keywords:
              first_line = lines[0].strip()
              if first_line:
@@ -60,7 +64,7 @@ def extract_specific_figure_from_pdf(pdf_stream, target_fig_text):
 
         target_keyword = search_keywords[0] if search_keywords else ""
         if not target_keyword:
-            return None, "無法識別圖號"
+            return None, "無法從說明文字中識別出圖號 (如 FIG. 1)"
 
         found_page_index = None
         matched_keyword_log = ""
@@ -77,11 +81,11 @@ def extract_specific_figure_from_pdf(pdf_stream, target_fig_text):
             page = doc[found_page_index]
             mat = fitz.Matrix(2, 2)
             pix = page.get_pixmap(matrix=mat)
-            return pix.tobytes("png"), f"成功匹配: {matched_keyword_log}"
+            return pix.tobytes("png"), f"成功" # 成功時只回傳成功
             
-        return None, f"PDF中找不到: {target_keyword}"
+        return None, f"PDF 中找不到關鍵字「{target_keyword}」"
     except Exception as e:
-        return None, f"錯誤: {str(e)}"
+        return None, f"PDF 解析發生錯誤: {str(e)}"
 
 # --- 函數：提取專利號 ---
 def extract_patent_number_from_text(text):
@@ -91,45 +95,40 @@ def extract_patent_number_from_text(text):
         return match.group(1)
     return ""
 
-# --- 函數：解析 Word 檔案 (平鋪邏輯 + 歷程記錄) ---
+# --- 函數：提取日期 (用於排序) ---
+def extract_date_for_sort(text):
+    # 尋找 2022.12.06, 2022/12/06, 2022-12-06
+    match = re.search(r'(\d{4})[./-](\d{1,2})[./-](\d{1,2})', text)
+    if match:
+        # 轉成 YYYYMMDD 字串以便排序
+        return f"{match.group(1)}{match.group(2).zfill(2)}{match.group(3).zfill(2)}"
+    return "99999999" # 若無日期排在最後
+
+# --- 函數：提取公司 (用於排序) ---
+def extract_company_for_sort(text):
+    lines = text.split('\n')
+    for line in lines:
+        if "公司" in line:
+            # 移除標籤，只留公司名
+            return line.replace("公司", "").replace("：", "").replace(":", "").strip()
+    return "ZZZ" # 若無公司排在最後
+
+# --- 函數：解析 Word 檔案 ---
 def parse_word_file(uploaded_docx):
     try:
         doc = docx.Document(uploaded_docx)
         cases = []
         
-        # 初始化當前案件
         current_case = {
             "case_info": "", "problem": "", "spirit": "", "key_point": "", "rep_fig_text": "",
             "image_data": None, "image_name": "Word匯入", "raw_case_no": "",
-            "parse_log": [] # 新增：記錄這筆案子吃到了哪些行
+            "sort_date": "99999999", "sort_company": "ZZZ",
+            "source_file": uploaded_docx.name, # 記錄來源檔名
+            "missing_fields": [] # 記錄缺漏欄位
         }
         current_field = None 
-        debug_raw_lines = [] # 全域除錯
-
-        # --- 開始遍歷 ---
-        for block in iter_block_items(doc):
-            text = ""
-            if isinstance(block, Paragraph):
-                text = block.text.strip()
-            elif isinstance(block, Table):
-                # 簡單將表格內容轉為多行文字
-                cell_texts = []
-                for row in block.rows:
-                    for cell in row.cells:
-                        for p in cell.paragraphs:
-                            if p.text.strip():
-                                cell_texts.append(p.text.strip())
-                # 這裡我們將表格內容視為一個大的文字區塊處理，或者您可以選擇逐行處理
-                # 為了邏輯簡單，我們把表格拆解成虛擬的行
-                # 但這裡為了配合迴圈結構，我們需要一個小技巧：直接處理這些文字
-                for cell_text in cell_texts:
-                    # 遞迴呼叫邏輯太複雜，這裡直接複製貼上核心邏輯 (或封裝成不含狀態的函數)
-                    # 為求保險，我們把表格文字插入到 text 處理流程中
-                    # 但因為 python 迴圈特性，我們改為收集所有文字行再統一跑迴圈
-                    pass 
-                # 修正：為了支援表格，我們改為先收集所有 lines，再跑狀態機
-            
-        # --- 步驟 1: 將文檔完全平展為 Lines (解決表格/段落混合問題) ---
+        
+        # 將文檔平展為 Lines
         all_lines = []
         for block in iter_block_items(doc):
             if isinstance(block, Paragraph):
@@ -142,107 +141,109 @@ def parse_word_file(uploaded_docx):
                             if p.text.strip():
                                 all_lines.append(p.text.strip())
         
-        # --- 步驟 2: 狀態機迴圈 ---
+        # 狀態機迴圈
         for text in all_lines:
-            debug_raw_lines.append(text[:20]) # 記錄前20字
-
-            # A. 判斷新案件 (案號/索號)
+            # A. 新案件判斷
             if "案號" in text or "索號" in text:
-                # 存檔上一筆
                 if current_case["case_info"] and current_field != "case_info_block":
+                    # 檢查上一筆是否有缺欄位
+                    if not current_case["problem"]: current_case["missing_fields"].append("解決問題")
+                    if not current_case["spirit"]: current_case["missing_fields"].append("發明精神")
+                    if not current_case["key_point"]: current_case["missing_fields"].append("一句重點")
                     cases.append(current_case)
-                    # 開新的一筆
+                    
                     current_case = {
                         "case_info": "", "problem": "", "spirit": "", "key_point": "", "rep_fig_text": "",
                         "image_data": None, "image_name": "Word匯入", "raw_case_no": "",
-                        "parse_log": []
+                        "sort_date": "99999999", "sort_company": "ZZZ",
+                        "source_file": uploaded_docx.name,
+                        "missing_fields": []
                     }
                 
                 current_field = "case_info_block"
                 current_case["case_info"] = text
-                current_case["parse_log"].append(f"[Info] {text}")
                 
+                # 提取排序與識別資訊
                 extracted_no = extract_patent_number_from_text(text)
-                if extracted_no:
-                    current_case["raw_case_no"] = extracted_no
+                if extracted_no: current_case["raw_case_no"] = extracted_no
+                current_case["sort_date"] = extract_date_for_sort(text)
+                current_case["sort_company"] = extract_company_for_sort(text)
                 continue
 
-            # B. 判斷欄位切換
+            # B. 欄位切換
             if "解決問題" in text:
                 current_field = "problem"
                 content = re.sub(r'^[0-9.．]*\s*解決問題[:：]?\s*', '', text)
                 current_case["problem"] = content
-                current_case["parse_log"].append(f"[Problem Header] {text}")
                 continue
-
             elif "發明精神" in text:
                 current_field = "spirit"
                 content = re.sub(r'^[0-9.．]*\s*發明精神[:：]?\s*', '', text)
                 current_case["spirit"] = content
-                current_case["parse_log"].append(f"[Spirit Header] {text}")
                 continue
-
             elif "重點" in text:
                 current_field = "key_point"
                 content = re.sub(r'^[0-9.．]*\s*(一句)?重點[:：]?\s*', '', text)
                 current_case["key_point"] = content
-                current_case["parse_log"].append(f"[KeyPoint Header] {text}")
                 continue
-
             elif "代表圖" in text:
                 current_field = "rep_fig"
                 content = re.sub(r'^[0-9.．]*\s*代表圖[:：]?\s*', '', text).strip()
                 current_case["rep_fig_text"] = content
-                current_case["parse_log"].append(f"[RepFig Header] {text}")
                 continue
 
-            # C. 內容填充 (狀態延續)
+            # C. 內容填充
             if current_field == "case_info_block":
                 current_case["case_info"] += "\n" + text
-                current_case["parse_log"].append(f"[Info+] {text}")
-                extracted_no = extract_patent_number_from_text(current_case["case_info"])
-                if extracted_no:
-                    current_case["raw_case_no"] = extracted_no
+                # 更新排序資訊 (因為日期或公司可能在下一行)
+                if current_case["sort_date"] == "99999999":
+                    current_case["sort_date"] = extract_date_for_sort(text)
+                if current_case["sort_company"] == "ZZZ":
+                    current_case["sort_company"] = extract_company_for_sort(text)
+                # 更新案號
+                if not current_case["raw_case_no"]:
+                    extracted_no = extract_patent_number_from_text(text)
+                    if extracted_no: current_case["raw_case_no"] = extracted_no
 
             elif current_field == "rep_fig":
                 current_case["rep_fig_text"] += "\n" + text
-                current_case["parse_log"].append(f"[RepFig+] {text}")
-
             elif current_field == "problem":
                 current_case["problem"] += "\n" + text
-                current_case["parse_log"].append(f"[Problem+] {text}")
-
             elif current_field == "spirit":
                 current_case["spirit"] += "\n" + text
-                current_case["parse_log"].append(f"[Spirit+] {text}")
-
             elif current_field == "key_point":
                 current_case["key_point"] += "\n" + text
-                current_case["parse_log"].append(f"[KeyPoint+] {text}")
-            
-            else:
-                current_case["parse_log"].append(f"[Ignored] {text}")
 
-        # 迴圈結束，存最後一筆
+        # 存最後一筆
         if current_case["case_info"]:
+            if not current_case["problem"]: current_case["missing_fields"].append("解決問題")
+            if not current_case["spirit"]: current_case["missing_fields"].append("發明精神")
+            if not current_case["key_point"]: current_case["missing_fields"].append("一句重點")
             cases.append(current_case)
             
-        return cases, debug_raw_lines
+        return cases
 
     except Exception as e:
-        st.error(f"解析 Word 時發生錯誤: {e}")
-        return [], []
+        st.error(f"解析 Word 時發生錯誤 ({uploaded_docx.name}): {e}")
+        return []
 
 # --- 側邊欄 ---
 with st.sidebar:
     st.header("1. 匯入資料")
-    word_file = st.file_uploader("Word 檔案 (.docx)", type=['docx'])
-    pdf_files = st.file_uploader("PDF 檔案 (.pdf)", type=['pdf'], accept_multiple_files=True)
+    # 修改：允許上傳多份 Word
+    word_files = st.file_uploader("Word 檔案 (可多選 .docx)", type=['docx'], accept_multiple_files=True)
+    pdf_files = st.file_uploader("PDF 檔案 (可多選 .pdf)", type=['pdf'], accept_multiple_files=True)
     
-    if word_file and st.button("🔄 開始智能整合", type="primary"):
-        extracted_cases, raw_lines = parse_word_file(word_file)
+    if word_files and st.button("🔄 開始智能整合", type="primary"):
+        all_cases = []
+        status_report_list = [] # 用來建立 DataFrame 的清單
         
-        # 讀取 PDF
+        # 1. 處理所有 Word 檔案
+        for word_file in word_files:
+            cases = parse_word_file(word_file)
+            all_cases.extend(cases)
+        
+        # 2. 準備 PDF 映射
         pdf_file_map = {}
         if pdf_files:
             for pdf in pdf_files:
@@ -251,14 +252,26 @@ with st.sidebar:
 
         match_count = 0
         
-        with st.spinner("正在搜尋圖片..."):
-            for case in extracted_cases:
+        with st.spinner("正在搜尋圖片並建立診斷報告..."):
+            for case in all_cases:
                 case_key = case["raw_case_no"]
                 target_fig = case["rep_fig_text"]
                 
+                # 診斷資訊初始化
+                status = {
+                    "來源檔案": case["source_file"],
+                    "案號": case_key if case_key else "(無法辨識)",
+                    "公司": case["sort_company"] if case["sort_company"] != "ZZZ" else "(未找到)",
+                    "日期": case["sort_date"] if case["sort_date"] != "99999999" else "(未找到)",
+                    "圖片狀態": "未處理",
+                    "錯誤原因": "",
+                    "缺漏欄位": ", ".join(case["missing_fields"]) if case["missing_fields"] else "無"
+                }
+
                 matched_pdf_bytes = None
                 matched_pdf_name = ""
                 
+                # 尋找對應 PDF
                 for pdf_key, pdf_bytes in pdf_file_map.items():
                     if case_key and ((pdf_key.lower() in case_key.lower()) or (case_key.lower() in pdf_key.lower())):
                         if len(case_key) > 4: 
@@ -266,56 +279,86 @@ with st.sidebar:
                             matched_pdf_name = pdf_key
                             break
                 
-                if matched_pdf_bytes and target_fig:
-                    img_data, log_msg = extract_specific_figure_from_pdf(matched_pdf_bytes, target_fig)
+                # 嘗試抓圖
+                if matched_pdf_bytes:
+                    img_data, msg = extract_specific_figure_from_pdf(matched_pdf_bytes, target_fig)
                     if img_data:
                         case["image_data"] = img_data
-                        case["image_name"] = f"截取成功 ({matched_pdf_name})"
+                        case["image_name"] = f"成功"
+                        status["圖片狀態"] = "✅ 成功"
                         match_count += 1
                     else:
-                        case["image_name"] = f"找不到圖 ({log_msg})"
+                        case["image_name"] = "缺圖"
+                        status["圖片狀態"] = "⚠️ 缺圖"
+                        status["錯誤原因"] = msg # 這裡會填入「PDF中找不到關鍵字」或「未指定代表圖」
                 else:
-                    if not matched_pdf_bytes:
-                        case["image_name"] = "無對應 PDF"
+                    if not target_fig:
+                        status["圖片狀態"] = "⚠️ 缺資訊"
+                        status["錯誤原因"] = "Word 中未填寫「代表圖」欄位"
                     else:
-                        case["image_name"] = "Word 無代表圖資訊"
+                        status["圖片狀態"] = "❌ 找不到 PDF"
+                        status["錯誤原因"] = f"找不到檔名包含「{case_key}」的 PDF"
+                
+                status_report_list.append(status)
 
-        if extracted_cases:
-            st.session_state['slides_data'].extend(extracted_cases)
-            st.success(f"處理完成！共 {len(extracted_cases)} 筆，截取 {match_count} 張圖。")
+        # 3. 排序邏輯
+        # Key 1: 公司 (sort_company), Key 2: 日期 (sort_date)
+        all_cases.sort(key=lambda x: (x["sort_company"], x["sort_date"]))
+        
+        # 同步排序 Status Report (為了讓表格順序跟 PPT 一樣)
+        status_report_list.sort(key=lambda x: (x["公司"], x["日期"]))
+
+        if all_cases:
+            st.session_state['slides_data'] = all_cases
+            st.session_state['status_report'] = status_report_list
+            st.success(f"處理完成！共 {len(all_cases)} 筆，成功截取 {match_count} 張圖。")
         else:
-            st.warning("Word 解析無資料。")
+            st.warning("所有 Word 檔案皆解析無資料。")
 
     if st.session_state['slides_data']:
         st.divider()
         if st.button("🗑️ 清除所有"):
             st.session_state['slides_data'] = []
+            st.session_state['status_report'] = []
             st.rerun()
 
 # --- 主畫面 ---
 if not st.session_state['slides_data']:
-    st.info("👈 請上傳檔案。此版本包含詳細的歸類歷程記錄。")
+    st.info("👈 請上傳 Word 與 PDF 檔案。支援多檔上傳、自動排序與錯誤診斷。")
 else:
-    st.subheader(f"📋 預覽")
-    
-    # === 新增：歷程檢視器 ===
-    with st.expander("🕵️ 查看歸類歷程 (若資料消失請點我看原因)", expanded=False):
-        for i, data in enumerate(st.session_state['slides_data']):
-            st.markdown(f"**Case {i+1}: {data['raw_case_no']}**")
-            st.json(data['parse_log']) # 直接顯示這筆案子吃到了什麼
-    # ========================
+    # === 1. 顯示診斷報告 (表格) ===
+    st.subheader("📊 處理結果診斷報告")
+    if st.session_state['status_report']:
+        df = pd.DataFrame(st.session_state['status_report'])
+        # 調整欄位順序
+        df = df[["案號", "公司", "日期", "圖片狀態", "錯誤原因", "缺漏欄位", "來源檔案"]]
+        st.dataframe(
+            df, 
+            hide_index=True,
+            column_config={
+                "圖片狀態": st.column_config.TextColumn("圖片狀態", width="small"),
+                "錯誤原因": st.column_config.TextColumn("錯誤詳細原因", width="large"),
+                "缺漏欄位": st.column_config.TextColumn("Word 缺漏欄位", width="medium"),
+            }
+        )
+    st.divider()
 
+    # === 2. 預覽區 (已排序) ===
+    st.subheader(f"📋 簡報預覽 (依公司 -> 日期排序)")
     cols = st.columns(3)
     for i, data in enumerate(st.session_state['slides_data']):
         with cols[i % 3]:
             with st.container(border=True):
+                # 標題加上排序資訊供檢查
                 st.markdown(f"**第 {i+1} 頁**")
-                st.text(data['case_info'])
+                st.caption(f"排序依據: {data['sort_company']} / {data['sort_date']}")
+                
+                st.text(data['case_info'][:100] + "...") # 只顯示前100字避免太長
                 
                 if data['image_data']:
                     st.image(data['image_data'], use_column_width=True)
                 else:
-                    # 強制處理 None 或空字串
+                    # 顯示文字內容
                     raw_text = data.get('rep_fig_text', "")
                     display_text = raw_text if raw_text and raw_text.strip() else "(Word中無代表圖資訊)"
                     st.warning(f"無圖片，將填入文字：\n{display_text[:50]}...")
@@ -412,6 +455,6 @@ else:
         st.download_button(
             label="📥 下載 PPT",
             data=binary_output,
-            file_name="reconstructed_logic_slides.pptx",
+            file_name="sorted_report_slides.pptx",
             mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
         )
