@@ -14,9 +14,23 @@ import re
 import pandas as pd
 
 # --- 設定網頁標題 ---
-st.set_page_config(page_title="PPT 重組生成器 (排序修正版)", page_icon="📑", layout="wide")
-st.title("📑 PPT 重組生成器 (精準排序版)")
-st.caption("修正：解決因讀取到「標題行」導致申請人排序失效的問題。")
+st.set_page_config(page_title="PPT 重組生成器 (含NBLM提示)", page_icon="📑", layout="wide")
+st.title("📑 PPT 重組生成器 (完整版)")
+st.caption("自動排序 (申請人 -> 日期)、支援多檔上傳、表格讀取與錯誤診斷。")
+
+# === 新增：NBLM 使用提示詞區塊 (藍色框) ===
+st.info("""
+**💡 NBLM 使用提示詞 (請複製以下文字貼入 NotebookLM)**
+
+根據上傳的所有來源，分開整理出以下重點(不要表格)：
+
+1. 案號 / 日期 / 公司 (案號依據"公開號"、日期依據"優先權日"、公司依據"申請人")
+2. 解決問題
+3. 發明精神(不要有公式)
+4. 一句重點(用來描述發明特徵重點，20字)
+5. 代表圖：(根據發明精神建議3張最可以說明發明精神的圖片，範例:FIG.3)
+""")
+# ==========================================
 
 # --- 初始化 Session State ---
 if 'slides_data' not in st.session_state:
@@ -96,29 +110,20 @@ def extract_patent_number_from_text(text):
 
 # --- 函數：提取日期 (用於排序) ---
 def extract_date_for_sort(text):
-    # 尋找 2022.12.06, 2022/12/06, 2022-12-06
     match = re.search(r'(\d{4})[./-](\d{1,2})[./-](\d{1,2})', text)
     if match:
         return f"{match.group(1)}{match.group(2).zfill(2)}{match.group(3).zfill(2)}"
     return "99999999"
 
-# --- 函數：提取公司/申請人 (修正版：跳過標題行) ---
+# --- 函數：提取公司/申請人 (用於排序) ---
 def extract_company_for_sort(text):
     lines = text.split('\n')
     for line in lines:
-        # 1. 檢查是否包含關鍵字
         if "公司" in line or "申請人" in line:
-            # 2. 關鍵修正：如果這行同時包含「案號」或「日期」，通常是標題行，跳過！
-            if "案號" in line and "日期" in line:
+            if "案號" in line and "日期" in line: # 跳過標題行
                 continue
-                
-            # 3. 清理雜訊
-            val = line.replace("公司", "").replace("申請人", "").replace("：", "").replace(":", "").strip()
-            
-            # 4. 確保不是空字串
-            if len(val) > 1:
-                return val
-    return "ZZZ" # 若沒找到
+            return line.replace("公司", "").replace("申請人", "").replace("：", "").replace(":", "").strip()
+    return "ZZZ"
 
 # --- 函數：解析 Word 檔案 ---
 def parse_word_file(uploaded_docx):
@@ -198,12 +203,10 @@ def parse_word_file(uploaded_docx):
             # C. 內容填充
             if current_field == "case_info_block":
                 current_case["case_info"] += "\n" + text
-                
-                # 持續更新排序資訊
                 if current_case["sort_date"] == "99999999":
                     current_case["sort_date"] = extract_date_for_sort(text)
                 
-                # 重新檢查公司名稱 (避免第一次只抓到標題)
+                # 再次嘗試提取公司 (避免第一行只抓到標題)
                 extracted_comp = extract_company_for_sort(current_case["case_info"])
                 if extracted_comp != "ZZZ":
                     current_case["sort_company"] = extracted_comp
@@ -266,8 +269,8 @@ with st.sidebar:
                 status = {
                     "來源檔案": case["source_file"],
                     "案號": case_key if case_key else "(無法辨識)",
-                    "排序抓取值 (公司)": case["sort_company"], # 診斷用
-                    "排序抓取值 (日期)": case["sort_date"],    # 診斷用
+                    "申請人/公司": case["sort_company"] if case["sort_company"] != "ZZZ" else "(未找到)",
+                    "日期": case["sort_date"] if case["sort_date"] != "99999999" else "(未找到)",
                     "圖片狀態": "未處理",
                     "錯誤原因": "",
                     "缺漏欄位": ", ".join(case["missing_fields"]) if case["missing_fields"] else "無"
@@ -302,9 +305,9 @@ with st.sidebar:
                 
                 status_report_list.append(status)
 
-        # 3. 排序邏輯 (公司名稱不分大小寫排序)
+        # 3. 排序 (公司/申請人 A-Z -> 日期早到晚)
         all_cases.sort(key=lambda x: (x["sort_company"].upper(), x["sort_date"]))
-        status_report_list.sort(key=lambda x: (x["排序抓取值 (公司)"].upper(), x["排序抓取值 (日期)"]))
+        status_report_list.sort(key=lambda x: (x["申請人/公司"].upper(), x["日期"]))
 
         if all_cases:
             st.session_state['slides_data'] = all_cases
@@ -324,14 +327,13 @@ with st.sidebar:
 if not st.session_state['slides_data']:
     st.info("👈 請上傳檔案。")
 else:
-    # 1. 預覽
+    # 1. 簡報預覽
     st.subheader(f"📋 簡報預覽 (已排序)")
     cols = st.columns(3)
     for i, data in enumerate(st.session_state['slides_data']):
         with cols[i % 3]:
             with st.container(border=True):
                 st.markdown(f"**第 {i+1} 頁**")
-                # 顯示排序鍵值供檢查
                 st.caption(f"{data['sort_company']} | {data['sort_date']}")
                 st.text(data['case_info'][:100] + "...")
                 
@@ -343,7 +345,7 @@ else:
                     st.warning(f"無圖片，將填入文字：\n{display_text[:50]}...")
                 st.caption(f"重點：{data['key_point']}")
 
-    # 下載
+    # PPT 下載
     def generate_ppt(slides_data):
         prs = Presentation()
         prs.slide_width = Inches(13.333)
@@ -421,7 +423,7 @@ else:
         binary_output.seek(0)
         st.download_button("📥 下載 PPT", binary_output, "final_slides.pptx")
 
-    # 2. 診斷表格 (放在下面)
+    # 2. 診斷表格 (最下面)
     st.divider()
     st.subheader("📊 處理結果診斷報告")
     if st.session_state['status_report']:
