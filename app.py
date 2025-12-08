@@ -14,22 +14,24 @@ import re
 import pandas as pd
 
 # --- 設定網頁標題 ---
-st.set_page_config(page_title="PPT 重組生成器 (含NBLM提示)", page_icon="📑", layout="wide")
+st.set_page_config(page_title="PPT 重組生成器 (複製提示詞版)", page_icon="📑", layout="wide")
 st.title("📑 PPT 重組生成器 (完整版)")
-st.caption("自動排序 (申請人 -> 日期)、支援多檔上傳、表格讀取與錯誤診斷。")
+st.caption("支援多檔上傳、自動排序 (申請人 -> 日期)、表格讀取與錯誤診斷。")
 
-# === 新增：NBLM 使用提示詞區塊 (藍色框) ===
-st.info("""
-**💡 NBLM 使用提示詞 (請複製以下文字貼入 NotebookLM)**
+# === 新增：NBLM 使用提示詞區塊 (含複製按鈕) ===
+st.info("💡 **NBLM 使用提示詞** (請點擊下方區塊右上角的 📄 圖示即可一鍵複製)")
 
-根據上傳的所有來源，分開整理出以下重點(不要表格)：
+# 定義提示詞內容
+nblm_prompt = """根據上傳的所有來源，分開整理出以下重點(不要表格)：
 
 1. 案號 / 日期 / 公司 (案號依據"公開號"、日期依據"優先權日"、公司依據"申請人")
 2. 解決問題
 3. 發明精神(不要有公式)
 4. 一句重點(用來描述發明特徵重點，20字)
-5. 代表圖：(根據發明精神建議3張最可以說明發明精神的圖片，範例:FIG.3)
-""")
+5. 代表圖：(根據發明精神建議3張最可以說明發明精神的圖片，範例:FIG.3)"""
+
+# 使用 st.code 顯示，這樣會自動出現複製按鈕
+st.code(nblm_prompt, language="text")
 # ==========================================
 
 # --- 初始化 Session State ---
@@ -206,7 +208,6 @@ def parse_word_file(uploaded_docx):
                 if current_case["sort_date"] == "99999999":
                     current_case["sort_date"] = extract_date_for_sort(text)
                 
-                # 再次嘗試提取公司 (避免第一行只抓到標題)
                 extracted_comp = extract_company_for_sort(current_case["case_info"])
                 if extracted_comp != "ZZZ":
                     current_case["sort_company"] = extracted_comp
