@@ -159,4 +159,169 @@ with st.sidebar:
         extracted_cases, raw_lines = parse_word_file(word_file)
         
         # 顯示原始資料檢查器 (Debug用)
-        with st.expander("🔍 檢查 Word 讀取到的內容 (若有問題請看這)", expanded=
+        with st.expander("🔍 檢查 Word 讀取到的內容 (若有問題請看這)", expanded=False):
+            st.write(raw_lines)
+        
+        # 讀取 PDF
+        pdf_file_map = {}
+        if pdf_files:
+            for pdf in pdf_files:
+                clean_name = re.sub(r'[^a-zA-Z0-9]', '', pdf.name.rsplit('.', 1)[0])
+                pdf_file_map[clean_name] = pdf.read()
+
+        # 配對
+        match_count = 0
+        
+        with st.spinner("正在處理..."):
+            for case in extracted_cases:
+                case_key = case["raw_case_no"]
+                target_fig = case["rep_fig_text"]
+                
+                matched_pdf_bytes = None
+                
+                for pdf_key, pdf_bytes in pdf_file_map.items():
+                    if case_key and ((pdf_key.lower() in case_key.lower()) or (case_key.lower() in pdf_key.lower())):
+                        if len(case_key) > 4: 
+                            matched_pdf_bytes = pdf_bytes
+                            break
+                
+                if matched_pdf_bytes and target_fig:
+                    img_data = extract_specific_figure_from_pdf(matched_pdf_bytes, target_fig)
+                    if img_data:
+                        case["image_data"] = img_data
+                        case["image_name"] = f"成功截取: {target_fig}"
+                        match_count += 1
+                    else:
+                        case["image_name"] = f"找不到圖"
+                else:
+                    case["image_name"] = "無對應資料"
+
+        if extracted_cases:
+            st.session_state['slides_data'].extend(extracted_cases)
+            st.success(f"處理完成！共 {len(extracted_cases)} 筆。")
+        else:
+            st.warning("Word 解析無資料。")
+
+    if st.session_state['slides_data']:
+        st.divider()
+        if st.button("🗑️ 清除所有"):
+            st.session_state['slides_data'] = []
+            st.rerun()
+
+# --- 主畫面 ---
+if not st.session_state['slides_data']:
+    st.info("👈 請上傳檔案。此版本修正了「代表圖」文字被誤刪的問題。")
+else:
+    st.subheader(f"📋 預覽")
+    cols = st.columns(3)
+    for i, data in enumerate(st.session_state['slides_data']):
+        with cols[i % 3]:
+            with st.container(border=True):
+                st.markdown(f"**第 {i+1} 頁**")
+                st.text(data['case_info'])
+                
+                if data['image_data']:
+                    st.image(data['image_data'], use_column_width=True)
+                else:
+                    st.info(f"無圖片，將填入：\n{data['rep_fig_text']}")
+                
+                st.caption(f"重點：{data['key_point']}")
+
+    st.divider()
+
+    # --- PPT 生成邏輯 ---
+    def generate_ppt(slides_data):
+        prs = Presentation()
+        prs.slide_width = Inches(13.333)
+        prs.slide_height = Inches(7.5)
+
+        for data in slides_data:
+            slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+            # 1. 左上：案號 / 日期 / 公司 (條列式)
+            left, top, width, height = Inches(0.5), Inches(0.5), Inches(5.0), Inches(2.0)
+            txBox = slide.shapes.add_textbox(left, top, width, height)
+            tf = txBox.text_frame
+            tf.word_wrap = True
+
+            info_lines = data['case_info'].split('\n')
+            for line in info_lines:
+                if line.strip():
+                    p = tf.add_paragraph()
+                    p.text = line.strip()
+                    p.font.size = Pt(20)
+                    p.font.bold = True
+                    p.font.color.rgb = RGBColor(0, 0, 0)
+                    p.alignment = PP_ALIGN.LEFT
+            
+            # 2. 右上：綠框區域
+            img_left = Inches(5.5)
+            img_top = Inches(0.5)
+            img_height = Inches(4.0)
+            img_width = Inches(7.0)
+
+            if data['image_data']:
+                image_stream = BytesIO(data['image_data'])
+                slide.shapes.add_picture(image_stream, img_left, img_top, height=img_height)
+            else:
+                # 替代文字 (16pt 條列式)
+                txBox = slide.shapes.add_textbox(img_left, img_top, img_width, img_height)
+                tf = txBox.text_frame
+                tf.word_wrap = True
+                
+                # 確保即便 Word 讀到的是空字串，也不會報錯，並顯示提示
+                content_text = data['rep_fig_text'] if data['rep_fig_text'].strip() else "(Word中無代表圖資訊)"
+                
+                lines = content_text.split('\n')
+                for line in lines:
+                    if line.strip():
+                        p = tf.add_paragraph()
+                        p.text = line.strip()
+                        p.font.size = Pt(16)
+                        p.font.bold = False
+                        p.alignment = PP_ALIGN.LEFT
+
+            # 3. 中下：文字區
+            left, top, width, height = Inches(0.5), Inches(4.8), Inches(12.3), Inches(1.5)
+            txBox = slide.shapes.add_textbox(left, top, width, height)
+            tf = txBox.text_frame
+            tf.word_wrap = True
+            
+            p1 = tf.add_paragraph()
+            p1.text = "• 解決問題：" + data['problem']
+            p1.font.size = Pt(18)
+            p1.space_after = Pt(12)
+
+            p2 = tf.add_paragraph()
+            p2.text = "• 發明精神：" + data['spirit']
+            p2.font.size = Pt(18)
+
+            # 4. 底部：重點
+            left, top, width, height = Inches(0.5), Inches(6.5), Inches(12.3), Inches(0.8)
+            shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
+            shape.fill.solid()
+            shape.fill.fore_color.rgb = RGBColor(255, 192, 0)
+            shape.line.color.rgb = RGBColor(255, 192, 0)
+
+            p = shape.text_frame.paragraphs[0]
+            p.text = data['key_point']
+            p.alignment = PP_ALIGN.CENTER
+            p.font.size = Pt(20)
+            p.font.bold = True
+            p.font.color.rgb = RGBColor(0, 0, 0)
+            shape.text_frame.vertical_anchor = MSO_SHAPE.RECTANGLE
+
+        return prs
+
+    if st.button("🚀 生成 PowerPoint (.pptx)", type="primary"):
+        prs = generate_ppt(st.session_state['slides_data'])
+        binary_output = BytesIO()
+        prs.save(binary_output)
+        binary_output.seek(0)
+        
+        st.download_button(
+            label="📥 下載 PPT",
+            data=binary_output,
+            file_name="fixed_parser_slides.pptx",
+            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        )
