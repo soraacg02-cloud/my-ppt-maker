@@ -4,7 +4,6 @@ from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.enum.text import PP_ALIGN
 from pptx.dml.color import RGBColor
-# 修正：同時匯入 MSO_SHAPE (畫圖用) 和 MSO_SHAPE_TYPE (辨識用)
 from pptx.enum.shapes import MSO_SHAPE, MSO_SHAPE_TYPE 
 from io import BytesIO
 import docx
@@ -16,9 +15,9 @@ import re
 import pandas as pd
 
 # --- 設定網頁標題 ---
-st.set_page_config(page_title="PPT 重組生成器 (Claim完美分頁版)", page_icon="📑", layout="wide")
-st.title("📑 PPT 重組生成器 (Claim 完美分頁版)")
-st.caption("修正：針對 (Claim X) 精準分頁、還原 o/▪ 縮排格式、左上角資訊條列化。")
+st.set_page_config(page_title="PPT 重組生成器 (Claim完美對應版)", page_icon="📑", layout="wide")
+st.title("📑 PPT 重組生成器 (Claim 完美對應版)")
+st.caption("修正：針對 Word 中 `• ... (Claim X)` 格式進行正確分頁與縮排處理。")
 
 # === NBLM 提示詞區塊 ===
 nblm_prompt = """根據上傳的所有來源，分開整理出以下重點(不要表格)：
@@ -201,7 +200,6 @@ def parse_word_file(uploaded_docx):
                 current_field = "rep_fig"
                 current_case["rep_fig_text"] = re.sub(r'^[0-9.．]*\s*代表圖[:：]?\s*', '', text).strip()
                 continue
-            # 寬鬆判斷 "6. 獨立項" 標題
             elif "獨立項" in text or ("claim" in text.lower() and "6" in text):
                 current_field = "claim"
                 content = re.sub(r'^[0-9.．]*\s*(獨立項)?(claim)?[:：]?\s*', '', text, flags=re.IGNORECASE).strip()
@@ -235,41 +233,39 @@ def parse_word_file(uploaded_docx):
         st.error(f"解析 Word 錯誤 ({uploaded_docx.name}): {e}")
         return []
 
-# --- 輔助函數：分割 Claim (智慧切割邏輯) ---
+# --- 輔助函數：分割 Claim (針對您的截圖格式修正) ---
 def split_claims_text(full_text):
-    """
-    分割依據：
-    1. 偵測到 "Claim + 數字" (如 "Claim 1")
-    2. 偵測到 "獨立項 + 數字"
-    3. 偵測到 "(Claim \d+)" (您截圖中的格式)
-    只要這行包含這些關鍵字，就視為新的一組。
-    """
     if not full_text: return []
     
     lines = full_text.split('\n')
     claims = []
     current_chunk = []
     
-    # 關鍵：這個 Regex 能抓到 "(Claim 1)" 或 "Claim 1" 或 "獨立項 1"
-    # 不管它在句首還是句中
-    header_pattern = re.compile(r'(\(Claim\s*\d+\)|Claim\s*\d+|獨立項\s*\d+)', re.IGNORECASE)
+    # 關鍵修正：放寬判斷標準
+    # 只要行中包含 (Claim 數字) 或 獨立項 數字，就視為新分頁
+    # 範例匹配： "• 電子裝置... (Claim 1)..."
+    header_pattern = re.compile(r'(\(Claim\s*\d+\)|Claim\s*\d+|獨立項\s*\d+|^\s*\d+\.\s)', re.IGNORECASE)
     
     for line in lines:
-        # 如果這一行包含 Claim 標記，代表是標題行 (新的一頁)
         if header_pattern.search(line):
+            # 遇到新的 Claim 標題
             if current_chunk:
-                # 存入上一組 (過濾掉純空白組)
-                if "".join(current_chunk).strip():
-                    claims.append(current_chunk)
+                claims.append(current_chunk)
             current_chunk = [line]
         else:
             current_chunk.append(line)
             
-    # 存最後一組
-    if current_chunk and "".join(current_chunk).strip():
+    if current_chunk:
         claims.append(current_chunk)
+    
+    # 過濾空資料
+    valid_claims = []
+    for chunk in claims:
+        chunk_str = "".join(chunk).strip()
+        if len(chunk_str) > 2:
+            valid_claims.append(chunk)
             
-    return claims
+    return valid_claims
 
 # --- 側邊欄 ---
 with st.sidebar:
@@ -369,15 +365,12 @@ else:
             # === 第一頁：原本的內容 ===
             slide = prs.slides.add_slide(prs.slide_layouts[6])
             
-            # 左上：案號 (修正：只過濾標題行，保留內容)
+            # 左上：案號 (完整顯示)
             left, top, width, height = Inches(0.5), Inches(0.5), Inches(5.0), Inches(2.0)
             txBox = slide.shapes.add_textbox(left, top, width, height)
             tf = txBox.text_frame; tf.word_wrap = True
             
             for line in data['case_info'].split('\n'):
-                # 過濾掉 "1. 案號 / 日期" 這種標題行，但保留 "公開號：..."
-                if "1. 案號" in line or "案號 / 日期" in line:
-                    continue
                 if line.strip():
                     p = tf.add_paragraph(); p.text = line.strip(); p.font.size = Pt(20); p.font.bold = True
 
@@ -401,7 +394,6 @@ else:
             p2 = tf.add_paragraph(); p2.text = "• 發明精神：" + data['spirit']; p2.font.size = Pt(18)
 
             left, top, width, height = Inches(0.5), Inches(6.5), Inches(12.3), Inches(0.8)
-            # 修正 MSO_SHAPE.RECTANGLE
             shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
             shape.fill.solid(); shape.fill.fore_color.rgb = RGBColor(255, 192, 0); shape.line.color.rgb = RGBColor(255, 192, 0)
             p = shape.text_frame.paragraphs[0]; p.text = data['key_point']; p.alignment = PP_ALIGN.CENTER; p.font.size = Pt(20); p.font.bold = True
@@ -411,24 +403,22 @@ else:
             if need_claim_slide:
                 claims_groups = split_claims_text(data['claim_text'])
                 
-                # 如果沒有分出任何組，但有文字，就整塊當一頁
+                # 如果沒有分出組但有文字，就整塊當一頁
                 if not claims_groups and data['claim_text'].strip():
                      claims_groups = [data['claim_text'].split('\n')]
 
                 for claim_lines in claims_groups:
                     slide_c = prs.slides.add_slide(prs.slide_layouts[6])
                     
-                    # 2.1 左上：案號 (邏輯同第一頁)
+                    # 2.1 左上：案號 (同步完整顯示)
                     left, top, width, height = Inches(0.5), Inches(0.5), Inches(5.0), Inches(2.0)
                     txBox = slide_c.shapes.add_textbox(left, top, width, height)
                     tf = txBox.text_frame; tf.word_wrap = True
                     for line in data['case_info'].split('\n'):
-                        if "1. 案號" in line or "案號 / 日期" in line:
-                            continue
                         if line.strip():
                             p = tf.add_paragraph(); p.text = line.strip(); p.font.size = Pt(20); p.font.bold = True
                     
-                    # 2.2 中間：Claim 內容 (保留縮排)
+                    # 2.2 中間：Claim 內容 (格式處理)
                     left, top, width, height = Inches(0.5), Inches(2.5), Inches(12.3), Inches(4.5)
                     txBox = slide_c.shapes.add_textbox(left, top, width, height)
                     tf = txBox.text_frame; tf.word_wrap = True
@@ -446,22 +436,19 @@ else:
                             p.font.size = Pt(14) 
                             p.space_after = Pt(4)
                             
-                            # === 關鍵：根據您的截圖符號設定縮排 ===
-                            # 空心圓 (o) 或 空心圓圈 (○) -> 第1層
-                            if clean_line.startswith(('o ', '○', 'O ')):
-                                p.level = 1
-                            # 實心方塊 (▪) 或 實心方框 (■) -> 第2層
-                            elif clean_line.startswith(('▪', '■')):
-                                p.level = 2
-                            # 減號 (-) -> 第1層
-                            elif clean_line.startswith('- '):
-                                p.level = 1
-                            # 實心圓 (•) -> 標題層，無縮排
-                            elif clean_line.startswith(('•', '●')):
+                            # === 關鍵縮排對應 (針對您的截圖) ===
+                            # Level 0 (標題): 包含 (Claim X) 或黑點開頭
+                            if "(Claim" in line or "獨立項" in line or clean_line.startswith(('•', '●')):
                                 p.level = 0
                                 p.font.bold = True
-                            # 原始文字有縮排 (Tab) -> 第1層
-                            elif line.startswith('\t') or line.startswith('    '):
+                            # Level 1: 空心圓 o, ○
+                            elif clean_line.startswith(('o ', '○', 'O ')):
+                                p.level = 1
+                            # Level 2: 實心方塊 ▪, ■
+                            elif clean_line.startswith(('▪', '■')):
+                                p.level = 2
+                            # Level 1: 減號 -, 數字 1.
+                            elif clean_line.startswith(('- ', '1.', '2.')):
                                 p.level = 1
 
         return prs
