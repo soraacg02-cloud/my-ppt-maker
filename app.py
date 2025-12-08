@@ -15,11 +15,11 @@ import re
 import pandas as pd
 
 # --- 設定網頁標題 ---
-st.set_page_config(page_title="PPT 重組生成器 (Prompt更新版)", page_icon="📑", layout="wide")
-st.title("📑 PPT 重組生成器 (含獨立項 Claim 功能)")
-st.caption("支援多檔上傳、自動排序、錯誤診斷，並可選擇是否產生「獨立項 Claim」分頁。")
+st.set_page_config(page_title="PPT 重組生成器 (Claim分頁版)", page_icon="📑", layout="wide")
+st.title("📑 PPT 重組生成器 (自動Claim分頁版)")
+st.caption("支援多檔上傳、自動排序、獨立項 Claim 自動依組數分頁。")
 
-# === NBLM 提示詞區塊 (更新：修改為最新的 6 點要求) ===
+# === NBLM 提示詞區塊 (更新：最新 6 點要求) ===
 nblm_prompt = """根據上傳的所有來源，分開整理出以下重點(不要表格)：
 
 1. 案號 / 日期 / 公司： *(案號依據"公開號"、日期依據"優先權日"、公司依據"申請人")
@@ -27,9 +27,9 @@ nblm_prompt = """根據上傳的所有來源，分開整理出以下重點(不�
 3. 發明精神：*(不要有公式)
 4. 一句重點： *(用來描述發明特徵重點，20字)
 5. 代表圖：*(根據發明精神建議3張最可以說明發明精神的圖片，範例:FIG.3)
-6. 獨立項claim： *(分組且分行條列式+對應的代表圖，claim要有位階縮排而且claim的元件要有標號)"""
+6. 獨立項claim： *(分組且分行條列式+對應的代表圖，claim要(1)有位階縮排 (2)claim的元件要有標號 (3)對應的claim號碼)"""
 
-st.info("💡 **NBLM 使用提示詞** (已更新為最新 6 點要求，點擊下方綠色按鈕一鍵複製)")
+st.info("💡 **NBLM 使用提示詞** (已更新，點擊下方綠色按鈕一鍵複製)")
 
 # 使用 HTML 建立顯眼複製按鈕
 components.html(
@@ -57,7 +57,7 @@ components.html(
     </body>
     </html>
     """,
-    height=350 # 稍微增加高度以容納更多文字
+    height=360
 )
 st.divider()
 
@@ -143,12 +143,11 @@ def extract_company_for_sort(text):
             return line.replace("公司", "").replace("申請人", "").replace("：", "").replace(":", "").strip()
     return "ZZZ"
 
-# --- 函數：解析 Word 檔案 (包含第6點解析) ---
+# --- 函數：解析 Word 檔案 ---
 def parse_word_file(uploaded_docx):
     try:
         doc = docx.Document(uploaded_docx)
         cases = []
-        # 新增 claim_text 欄位
         current_case = {
             "case_info": "", "problem": "", "spirit": "", "key_point": "", "rep_fig_text": "", "claim_text": "",
             "image_data": None, "image_name": "Word匯入", "raw_case_no": "",
@@ -168,7 +167,6 @@ def parse_word_file(uploaded_docx):
                             if p.text.strip(): all_lines.append(p.text.strip())
         
         for text in all_lines:
-            # 1. 案號 (新案件起點)
             if "案號" in text or "索號" in text:
                 if current_case["case_info"] and current_field != "case_info_block":
                     if not current_case["problem"]: current_case["missing_fields"].append("解決問題")
@@ -187,7 +185,6 @@ def parse_word_file(uploaded_docx):
                 current_case["sort_company"] = extract_company_for_sort(text)
                 continue
 
-            # 2. 欄位切換
             if "解決問題" in text:
                 current_field = "problem"
                 current_case["problem"] = re.sub(r'^[0-9.．]*\s*解決問題[:：]?\s*', '', text)
@@ -204,14 +201,12 @@ def parse_word_file(uploaded_docx):
                 current_field = "rep_fig"
                 current_case["rep_fig_text"] = re.sub(r'^[0-9.．]*\s*代表圖[:：]?\s*', '', text).strip()
                 continue
-            # 新增：Claim 欄位辨識 (相容 "6.獨立項claim")
             elif "獨立項" in text or ("claim" in text.lower() and "6" in text):
                 current_field = "claim"
                 content = re.sub(r'^[0-9.．]*\s*(獨立項)?(claim)?[:：]?\s*', '', text, flags=re.IGNORECASE).strip()
                 current_case["claim_text"] = content
                 continue
 
-            # 3. 內容填充
             if current_field == "case_info_block":
                 current_case["case_info"] += "\n" + text
                 if current_case["sort_date"] == "99999999": current_case["sort_date"] = extract_date_for_sort(text)
@@ -239,6 +234,39 @@ def parse_word_file(uploaded_docx):
         st.error(f"解析 Word 錯誤 ({uploaded_docx.name}): {e}")
         return []
 
+# --- 輔助函數：分割 Claim (依據編號) ---
+def split_claims_text(full_text):
+    """
+    將整塊 claim 文字依據 "1.", "Claim 1", "獨立項 1" 等編號進行切分。
+    回傳一個字串列表，每個字串代表一頁 PPT 的內容。
+    """
+    if not full_text:
+        return []
+    
+    lines = full_text.split('\n')
+    claims = []
+    current_chunk = []
+    
+    # Regex: 偵測行首是否為數字編號 (例如 "1.", "8.", "Claim 1")
+    # ^\s* -> 行首空白
+    # (\d+\.|Claim\s+\d+|獨立項\s+\d+) -> 數字加點, 或 Claim 加數字
+    header_pattern = re.compile(r'^\s*(\d+\.|Claim\s+\d+|獨立項\s+\d+)', re.IGNORECASE)
+    
+    for line in lines:
+        # 如果遇到新的編號，且當前 chunk 不為空，先存檔
+        if header_pattern.match(line):
+            if current_chunk:
+                claims.append("\n".join(current_chunk))
+            current_chunk = [line] # 開始新的一組
+        else:
+            current_chunk.append(line)
+            
+    # 存最後一組
+    if current_chunk:
+        claims.append("\n".join(current_chunk))
+        
+    return claims
+
 # --- 側邊欄 ---
 with st.sidebar:
     st.header("1. 匯入資料")
@@ -247,7 +275,7 @@ with st.sidebar:
     
     st.divider()
     st.header("2. 輸出設定")
-    add_claim_slide = st.checkbox("✅ 是否要產生 Claim 分頁", value=False, help="勾選後，每個案子會多出一頁專門放獨立項 Claim")
+    add_claim_slide = st.checkbox("✅ 是否產生 Claim 分頁", value=False, help="勾選後，程式會自動識別獨立項數量，並為每一組獨立項產生一頁")
 
     if word_files and st.button("🔄 開始智能整合", type="primary"):
         all_cases = []
@@ -322,8 +350,11 @@ else:
                 if data['image_data']: st.image(data['image_data'], use_column_width=True)
                 else: st.warning("無圖片")
                 
-                claim_preview = data['claim_text'][:50] + "..." if data['claim_text'] else "(無 Claim 資料)"
-                st.caption(f"Claim: {claim_preview}")
+                # 預覽區提示 Claim 狀態
+                # 嘗試預先分割以顯示數量
+                claims_preview = split_claims_text(data['claim_text'])
+                count_claims = len(claims_preview) if data['claim_text'] else 0
+                st.caption(f"Claim: {count_claims} 組獨立項")
 
     # --- PPT 生成邏輯 ---
     def generate_ppt(slides_data, need_claim_slide):
@@ -332,10 +363,10 @@ else:
         prs.slide_height = Inches(7.5)
         
         for data in slides_data:
-            # === 第一頁 ===
+            # === 第一頁：原本的內容 ===
             slide = prs.slides.add_slide(prs.slide_layouts[6])
             
-            # 左上
+            # 左上：案號
             left, top, width, height = Inches(0.5), Inches(0.5), Inches(5.0), Inches(2.0)
             txBox = slide.shapes.add_textbox(left, top, width, height)
             tf = txBox.text_frame; tf.word_wrap = True
@@ -368,32 +399,43 @@ else:
             p = shape.text_frame.paragraphs[0]; p.text = data['key_point']; p.alignment = PP_ALIGN.CENTER; p.font.size = Pt(20); p.font.bold = True
             shape.text_frame.vertical_anchor = MSO_SHAPE.RECTANGLE
 
-            # === 第二頁：Claim (勾選時) ===
+            # === Claim 分頁邏輯 (如果勾選) ===
             if need_claim_slide:
-                slide2 = prs.slides.add_slide(prs.slide_layouts[6])
+                # 1. 取得所有獨立項內容 (List)
+                claims_list = split_claims_text(data['claim_text'])
                 
-                # 左上 (同上)
-                left, top, width, height = Inches(0.5), Inches(0.5), Inches(5.0), Inches(2.0)
-                txBox = slide2.shapes.add_textbox(left, top, width, height)
-                tf = txBox.text_frame; tf.word_wrap = True
-                for line in data['case_info'].split('\n'):
-                    if line.strip():
-                        p = tf.add_paragraph(); p.text = line.strip(); p.font.size = Pt(20); p.font.bold = True
-                
-                # 中間：Claim
-                left, top, width, height = Inches(0.5), Inches(2.5), Inches(12.3), Inches(4.5)
-                txBox = slide2.shapes.add_textbox(left, top, width, height)
-                tf = txBox.text_frame; tf.word_wrap = True
-                
-                p_title = tf.add_paragraph()
-                p_title.text = "【獨立項 Claim】"
-                p_title.font.size = Pt(24); p_title.font.bold = True; p_title.font.color.rgb = RGBColor(0, 112, 192)
-                p_title.space_after = Pt(10)
-                
-                claim_content = data['claim_text'] if data['claim_text'].strip() else "(Word 中無 Claim 資料)"
-                for line in claim_content.split('\n'):
-                    if line.strip():
-                        p = tf.add_paragraph(); p.text = line.strip(); p.font.size = Pt(18); p.space_after = Pt(6)
+                # 如果完全沒抓到東西，但勾選了，還是產出一頁顯示無資料
+                if not claims_list:
+                    claims_list = ["(Word 中無 Claim 資料)"]
+
+                # 2. 針對每一組獨立項，產生一頁
+                for claim_content in claims_list:
+                    slide_c = prs.slides.add_slide(prs.slide_layouts[6])
+                    
+                    # 2.1 左上：案號 (同首頁)
+                    left, top, width, height = Inches(0.5), Inches(0.5), Inches(5.0), Inches(2.0)
+                    txBox = slide_c.shapes.add_textbox(left, top, width, height)
+                    tf = txBox.text_frame; tf.word_wrap = True
+                    for line in data['case_info'].split('\n'):
+                        if line.strip():
+                            p = tf.add_paragraph(); p.text = line.strip(); p.font.size = Pt(20); p.font.bold = True
+                    
+                    # 2.2 中間：Claim 內容
+                    left, top, width, height = Inches(0.5), Inches(2.5), Inches(12.3), Inches(4.5)
+                    txBox = slide_c.shapes.add_textbox(left, top, width, height)
+                    tf = txBox.text_frame; tf.word_wrap = True
+                    
+                    p_title = tf.add_paragraph()
+                    p_title.text = "【獨立項 Claim】"
+                    p_title.font.size = Pt(24); p_title.font.bold = True; p_title.font.color.rgb = RGBColor(0, 112, 192)
+                    p_title.space_after = Pt(10)
+                    
+                    for line in claim_content.split('\n'):
+                        if line.strip():
+                            p = tf.add_paragraph()
+                            p.text = line.strip()
+                            p.font.size = Pt(14) # 字體統一 14pt
+                            p.space_after = Pt(6)
 
         return prs
 
