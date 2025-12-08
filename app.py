@@ -13,9 +13,9 @@ import fitz  # PyMuPDF
 import re
 
 # --- 設定網頁標題 ---
-st.set_page_config(page_title="PPT 重組生成器 (表格支援版)", page_icon="📑", layout="wide")
-st.title("📑 PPT 重組生成器 (全域讀取版)")
-st.caption("升級：新增「表格讀取」功能，解決文字放在 Word 表格內無法辨識的問題。")
+st.set_page_config(page_title="PPT 重組生成器 (除錯最終版)", page_icon="📑", layout="wide")
+st.title("📑 PPT 重組生成器 (邏輯重構版)")
+st.caption("重構：採用平鋪式迴圈處理，並新增「單案歷程」以追蹤文字歸類狀況。")
 
 # --- 初始化 Session State ---
 if 'slides_data' not in st.session_state:
@@ -23,14 +23,10 @@ if 'slides_data' not in st.session_state:
 
 # --- 輔助函數：遍歷 Word 所有區塊 (含表格) ---
 def iter_block_items(parent):
-    """
-    產生器：依序回傳 Word 文件中的 Paragraph (段落) 和 Table (表格)
-    """
     if isinstance(parent, Document):
         parent_elm = parent.element.body
     else:
         raise ValueError("只支援讀取整份 Document")
-
     for child in parent_elm.iterchildren():
         if child.tag.endswith('p'):
             yield Paragraph(child, parent)
@@ -50,7 +46,6 @@ def extract_specific_figure_from_pdf(pdf_stream, target_fig_text):
         
         search_keywords = []
         lines = target_fig_text.split('\n')
-        
         for line in lines:
             match = pattern.search(line)
             if match:
@@ -64,18 +59,15 @@ def extract_specific_figure_from_pdf(pdf_stream, target_fig_text):
                  search_keywords.append(first_line[:10].replace(" ", "").upper())
 
         target_keyword = search_keywords[0] if search_keywords else ""
-        
         if not target_keyword:
             return None, "無法識別圖號"
 
-        # 搜尋 PDF
         found_page_index = None
         matched_keyword_log = ""
 
         for i, page in enumerate(doc):
             page_text = page.get_text()
             clean_page_text = page_text.replace(" ", "").upper()
-            
             if target_keyword in clean_page_text:
                 found_page_index = i
                 matched_keyword_log = target_keyword
@@ -88,7 +80,6 @@ def extract_specific_figure_from_pdf(pdf_stream, target_fig_text):
             return pix.tobytes("png"), f"成功匹配: {matched_keyword_log}"
             
         return None, f"PDF中找不到: {target_keyword}"
-
     except Exception as e:
         return None, f"錯誤: {str(e)}"
 
@@ -100,94 +91,139 @@ def extract_patent_number_from_text(text):
         return match.group(1)
     return ""
 
-# --- 函數：解析 Word 檔案 (支援表格 + 嚴格狀態機) ---
+# --- 函數：解析 Word 檔案 (平鋪邏輯 + 歷程記錄) ---
 def parse_word_file(uploaded_docx):
     try:
         doc = docx.Document(uploaded_docx)
         cases = []
+        
+        # 初始化當前案件
         current_case = {
-            "case_info": "", 
-            "problem": "", "spirit": "", "key_point": "", "rep_fig_text": "",
-            "image_data": None, "image_name": "Word匯入", "raw_case_no": ""
+            "case_info": "", "problem": "", "spirit": "", "key_point": "", "rep_fig_text": "",
+            "image_data": None, "image_name": "Word匯入", "raw_case_no": "",
+            "parse_log": [] # 新增：記錄這筆案子吃到了哪些行
         }
         current_field = None 
-        debug_raw_lines = []
+        debug_raw_lines = [] # 全域除錯
 
-        # 定義一個處理單行文字的內部函數
-        def process_line(text):
-            nonlocal current_case, current_field
+        # --- 開始遍歷 ---
+        for block in iter_block_items(doc):
+            text = ""
+            if isinstance(block, Paragraph):
+                text = block.text.strip()
+            elif isinstance(block, Table):
+                # 簡單將表格內容轉為多行文字
+                cell_texts = []
+                for row in block.rows:
+                    for cell in row.cells:
+                        for p in cell.paragraphs:
+                            if p.text.strip():
+                                cell_texts.append(p.text.strip())
+                # 這裡我們將表格內容視為一個大的文字區塊處理，或者您可以選擇逐行處理
+                # 為了邏輯簡單，我們把表格拆解成虛擬的行
+                # 但這裡為了配合迴圈結構，我們需要一個小技巧：直接處理這些文字
+                for cell_text in cell_texts:
+                    # 遞迴呼叫邏輯太複雜，這裡直接複製貼上核心邏輯 (或封裝成不含狀態的函數)
+                    # 為求保險，我們把表格文字插入到 text 處理流程中
+                    # 但因為 python 迴圈特性，我們改為收集所有文字行再統一跑迴圈
+                    pass 
+                # 修正：為了支援表格，我們改為先收集所有 lines，再跑狀態機
             
-            # 1. 新案件判斷
+        # --- 步驟 1: 將文檔完全平展為 Lines (解決表格/段落混合問題) ---
+        all_lines = []
+        for block in iter_block_items(doc):
+            if isinstance(block, Paragraph):
+                if block.text.strip():
+                    all_lines.append(block.text.strip())
+            elif isinstance(block, Table):
+                for row in block.rows:
+                    for cell in row.cells:
+                        for p in cell.paragraphs:
+                            if p.text.strip():
+                                all_lines.append(p.text.strip())
+        
+        # --- 步驟 2: 狀態機迴圈 ---
+        for text in all_lines:
+            debug_raw_lines.append(text[:20]) # 記錄前20字
+
+            # A. 判斷新案件 (案號/索號)
             if "案號" in text or "索號" in text:
+                # 存檔上一筆
                 if current_case["case_info"] and current_field != "case_info_block":
                     cases.append(current_case)
+                    # 開新的一筆
                     current_case = {
                         "case_info": "", "problem": "", "spirit": "", "key_point": "", "rep_fig_text": "",
-                        "image_data": None, "image_name": "Word匯入", "raw_case_no": ""
+                        "image_data": None, "image_name": "Word匯入", "raw_case_no": "",
+                        "parse_log": []
                     }
+                
                 current_field = "case_info_block"
-                current_case["case_info"] = text 
+                current_case["case_info"] = text
+                current_case["parse_log"].append(f"[Info] {text}")
+                
                 extracted_no = extract_patent_number_from_text(text)
                 if extracted_no:
                     current_case["raw_case_no"] = extracted_no
-                return
+                continue
 
-            # 2. 欄位切換
+            # B. 判斷欄位切換
             if "解決問題" in text:
                 current_field = "problem"
                 content = re.sub(r'^[0-9.．]*\s*解決問題[:：]?\s*', '', text)
                 current_case["problem"] = content
-                return
+                current_case["parse_log"].append(f"[Problem Header] {text}")
+                continue
+
             elif "發明精神" in text:
                 current_field = "spirit"
                 content = re.sub(r'^[0-9.．]*\s*發明精神[:：]?\s*', '', text)
                 current_case["spirit"] = content
-                return
+                current_case["parse_log"].append(f"[Spirit Header] {text}")
+                continue
+
             elif "重點" in text:
                 current_field = "key_point"
                 content = re.sub(r'^[0-9.．]*\s*(一句)?重點[:：]?\s*', '', text)
                 current_case["key_point"] = content
-                return
+                current_case["parse_log"].append(f"[KeyPoint Header] {text}")
+                continue
+
             elif "代表圖" in text:
                 current_field = "rep_fig"
                 content = re.sub(r'^[0-9.．]*\s*代表圖[:：]?\s*', '', text).strip()
                 current_case["rep_fig_text"] = content
-                return
+                current_case["parse_log"].append(f"[RepFig Header] {text}")
+                continue
 
-            # 3. 內容填充
+            # C. 內容填充 (狀態延續)
             if current_field == "case_info_block":
                 current_case["case_info"] += "\n" + text
+                current_case["parse_log"].append(f"[Info+] {text}")
                 extracted_no = extract_patent_number_from_text(current_case["case_info"])
                 if extracted_no:
                     current_case["raw_case_no"] = extracted_no
+
             elif current_field == "rep_fig":
                 current_case["rep_fig_text"] += "\n" + text
+                current_case["parse_log"].append(f"[RepFig+] {text}")
+
             elif current_field == "problem":
                 current_case["problem"] += "\n" + text
+                current_case["parse_log"].append(f"[Problem+] {text}")
+
             elif current_field == "spirit":
                 current_case["spirit"] += "\n" + text
+                current_case["parse_log"].append(f"[Spirit+] {text}")
+
             elif current_field == "key_point":
                 current_case["key_point"] += "\n" + text
-
-        # --- 主迴圈：遍歷所有區塊 (段落 + 表格) ---
-        for block in iter_block_items(doc):
-            if isinstance(block, Paragraph):
-                text = block.text.strip()
-                if text:
-                    debug_raw_lines.append(f"[P] {text[:20]}...")
-                    process_line(text)
+                current_case["parse_log"].append(f"[KeyPoint+] {text}")
             
-            elif isinstance(block, Table):
-                # 如果是表格，將其「攤平」為一連串的文字行
-                for row in block.rows:
-                    for cell in row.cells:
-                        for paragraph in cell.paragraphs:
-                            text = paragraph.text.strip()
-                            if text:
-                                debug_raw_lines.append(f"[Tab] {text[:20]}...")
-                                process_line(text)
+            else:
+                current_case["parse_log"].append(f"[Ignored] {text}")
 
-        # 存最後一筆
+        # 迴圈結束，存最後一筆
         if current_case["case_info"]:
             cases.append(current_case)
             
@@ -206,10 +242,6 @@ with st.sidebar:
     if word_file and st.button("🔄 開始智能整合", type="primary"):
         extracted_cases, raw_lines = parse_word_file(word_file)
         
-        # Debug 資訊
-        with st.expander("🔍 Word 讀取診斷 (看看是否有讀到表格)", expanded=False):
-            st.write(raw_lines)
-        
         # 讀取 PDF
         pdf_file_map = {}
         if pdf_files:
@@ -227,7 +259,6 @@ with st.sidebar:
                 matched_pdf_bytes = None
                 matched_pdf_name = ""
                 
-                # 尋找對應 PDF
                 for pdf_key, pdf_bytes in pdf_file_map.items():
                     if case_key and ((pdf_key.lower() in case_key.lower()) or (case_key.lower() in pdf_key.lower())):
                         if len(case_key) > 4: 
@@ -263,9 +294,17 @@ with st.sidebar:
 
 # --- 主畫面 ---
 if not st.session_state['slides_data']:
-    st.info("👈 請上傳檔案。此版本支援讀取 Word 表格內的文字。")
+    st.info("👈 請上傳檔案。此版本包含詳細的歸類歷程記錄。")
 else:
     st.subheader(f"📋 預覽")
+    
+    # === 新增：歷程檢視器 ===
+    with st.expander("🕵️ 查看歸類歷程 (若資料消失請點我看原因)", expanded=False):
+        for i, data in enumerate(st.session_state['slides_data']):
+            st.markdown(f"**Case {i+1}: {data['raw_case_no']}**")
+            st.json(data['parse_log']) # 直接顯示這筆案子吃到了什麼
+    # ========================
+
     cols = st.columns(3)
     for i, data in enumerate(st.session_state['slides_data']):
         with cols[i % 3]:
@@ -276,7 +315,9 @@ else:
                 if data['image_data']:
                     st.image(data['image_data'], use_column_width=True)
                 else:
-                    display_text = data['rep_fig_text'] if data['rep_fig_text'].strip() else "(Word中無代表圖資訊)"
+                    # 強制處理 None 或空字串
+                    raw_text = data.get('rep_fig_text', "")
+                    display_text = raw_text if raw_text and raw_text.strip() else "(Word中無代表圖資訊)"
                     st.warning(f"無圖片，將填入文字：\n{display_text[:50]}...")
                 
                 st.caption(f"重點：{data['key_point']}")
@@ -297,7 +338,6 @@ else:
             txBox = slide.shapes.add_textbox(left, top, width, height)
             tf = txBox.text_frame
             tf.word_wrap = True
-
             info_lines = data['case_info'].split('\n')
             for line in info_lines:
                 if line.strip():
@@ -321,7 +361,10 @@ else:
                 txBox = slide.shapes.add_textbox(img_left, img_top, img_width, img_height)
                 tf = txBox.text_frame
                 tf.word_wrap = True
-                content_text = data['rep_fig_text'] if data['rep_fig_text'].strip() else "(Word中無代表圖資訊)"
+                
+                raw_text = data.get('rep_fig_text', "")
+                content_text = raw_text if raw_text and raw_text.strip() else "(Word中無代表圖資訊)"
+                
                 lines = content_text.split('\n')
                 for line in lines:
                     if line.strip():
@@ -369,6 +412,6 @@ else:
         st.download_button(
             label="📥 下載 PPT",
             data=binary_output,
-            file_name="table_aware_slides.pptx",
+            file_name="reconstructed_logic_slides.pptx",
             mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
         )
