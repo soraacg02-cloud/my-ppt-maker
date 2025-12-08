@@ -12,14 +12,21 @@ from docx.table import Table
 import fitz  # PyMuPDF
 import re
 import pandas as pd
+# 新增：匯入複製按鈕元件
+# (請確保已在 requirements.txt 加入 streamlit-copy-to-clipboard 並重啟 App)
+try:
+    from st_copy_to_clipboard import st_copy_to_clipboard
+    HAS_COPY_COMPONENT = True
+except ImportError:
+    HAS_COPY_COMPONENT = False
 
 # --- 設定網頁標題 ---
-st.set_page_config(page_title="PPT 重組生成器 (複製提示詞版)", page_icon="📑", layout="wide")
+st.set_page_config(page_title="PPT 重組生成器 (顯眼複製鈕版)", page_icon="📑", layout="wide")
 st.title("📑 PPT 重組生成器 (完整版)")
 st.caption("支援多檔上傳、自動排序 (申請人 -> 日期)、表格讀取與錯誤診斷。")
 
-# === 新增：NBLM 使用提示詞區塊 (含複製按鈕) ===
-st.info("💡 **NBLM 使用提示詞** (請點擊下方區塊右上角的 📄 圖示即可一鍵複製)")
+# === 新增：NBLM 使用提示詞區塊 (顯眼複製鈕) ===
+st.info("💡 **NBLM 使用提示詞** (請點擊下方按鈕一鍵複製)")
 
 # 定義提示詞內容
 nblm_prompt = """根據上傳的所有來源，分開整理出以下重點(不要表格)：
@@ -30,8 +37,19 @@ nblm_prompt = """根據上傳的所有來源，分開整理出以下重點(不�
 4. 一句重點(用來描述發明特徵重點，20字)
 5. 代表圖：(根據發明精神建議3張最可以說明發明精神的圖片，範例:FIG.3)"""
 
-# 使用 st.code 顯示，這樣會自動出現複製按鈕
-st.code(nblm_prompt, language="text")
+# 使用文字框顯示內容 (設為唯讀，避免誤改)
+st.text_area("提示詞內容預覽", nblm_prompt, height=230, disabled=True, label_visibility="collapsed")
+
+# 顯示顯眼的複製按鈕
+if HAS_COPY_COMPONENT:
+    # 參數: (要複製的文字, 按鈕顯示文字, 複製成功後顯示文字)
+    st_copy_to_clipboard(nblm_prompt, "📋 點擊這裡一鍵複製提示詞", "✅ 已複製成功！")
+else:
+    st.warning("⚠️ 尚未安裝 `streamlit-copy-to-clipboard` 套件。請在 requirements.txt 中加入該套件並重啟 App 以啟用顯眼複製按鈕。")
+    # 備用方案：如果沒安裝套件，還是顯示舊版的 st.code
+    st.code(nblm_prompt, language="text")
+
+st.divider()
 # ==========================================
 
 # --- 初始化 Session State ---
@@ -326,7 +344,7 @@ with st.sidebar:
 
 # --- 主畫面 ---
 if not st.session_state['slides_data']:
-    st.info("👈 請上傳檔案。")
+    st.info("👈 請先在左側上傳檔案。")
 else:
     # 1. 簡報預覽
     st.subheader(f"📋 簡報預覽 (已排序)")
