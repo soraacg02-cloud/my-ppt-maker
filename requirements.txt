@@ -2,3 +2,4 @@ streamlit
 requests
 Pillow
 python-pptx
+python-docx
