@@ -14,9 +14,9 @@ import re
 import pandas as pd
 
 # --- 設定網頁標題 ---
-st.set_page_config(page_title="PPT 重組生成器 (排序優化版)", page_icon="📑", layout="wide")
-st.title("📑 PPT 重組生成器 (排序優化版)")
-st.caption("更新：PPT 預覽置頂，排序邏輯為「申請人(A-Z) -> 日期(早-晚)」。")
+st.set_page_config(page_title="PPT 重組生成器 (排序修正版)", page_icon="📑", layout="wide")
+st.title("📑 PPT 重組生成器 (精準排序版)")
+st.caption("修正：解決因讀取到「標題行」導致申請人排序失效的問題。")
 
 # --- 初始化 Session State ---
 if 'slides_data' not in st.session_state:
@@ -94,23 +94,31 @@ def extract_patent_number_from_text(text):
         return match.group(1)
     return ""
 
-# --- 函數：提取日期 (用於排序：早到晚) ---
+# --- 函數：提取日期 (用於排序) ---
 def extract_date_for_sort(text):
     # 尋找 2022.12.06, 2022/12/06, 2022-12-06
     match = re.search(r'(\d{4})[./-](\d{1,2})[./-](\d{1,2})', text)
     if match:
-        # 轉成 YYYYMMDD 字串，字串比較下，數值小的(日期早)會排在前面
         return f"{match.group(1)}{match.group(2).zfill(2)}{match.group(3).zfill(2)}"
-    return "99999999" # 若無日期排在最後
+    return "99999999"
 
-# --- 函數：提取公司/申請人 (用於排序) ---
+# --- 函數：提取公司/申請人 (修正版：跳過標題行) ---
 def extract_company_for_sort(text):
     lines = text.split('\n')
     for line in lines:
-        # 同時支援「公司」與「申請人」
+        # 1. 檢查是否包含關鍵字
         if "公司" in line or "申請人" in line:
-            return line.replace("公司", "").replace("申請人", "").replace("：", "").replace(":", "").strip()
-    return "ZZZ" # 若無公司排在最後
+            # 2. 關鍵修正：如果這行同時包含「案號」或「日期」，通常是標題行，跳過！
+            if "案號" in line and "日期" in line:
+                continue
+                
+            # 3. 清理雜訊
+            val = line.replace("公司", "").replace("申請人", "").replace("：", "").replace(":", "").strip()
+            
+            # 4. 確保不是空字串
+            if len(val) > 1:
+                return val
+    return "ZZZ" # 若沒找到
 
 # --- 函數：解析 Word 檔案 ---
 def parse_word_file(uploaded_docx):
@@ -127,7 +135,6 @@ def parse_word_file(uploaded_docx):
         }
         current_field = None 
         
-        # 將文檔平展為 Lines
         all_lines = []
         for block in iter_block_items(doc):
             if isinstance(block, Paragraph):
@@ -140,7 +147,6 @@ def parse_word_file(uploaded_docx):
                             if p.text.strip():
                                 all_lines.append(p.text.strip())
         
-        # 狀態機迴圈
         for text in all_lines:
             # A. 新案件判斷
             if "案號" in text or "索號" in text:
@@ -192,11 +198,15 @@ def parse_word_file(uploaded_docx):
             # C. 內容填充
             if current_field == "case_info_block":
                 current_case["case_info"] += "\n" + text
-                # 更新排序資訊 (支援 公司 或 申請人)
+                
+                # 持續更新排序資訊
                 if current_case["sort_date"] == "99999999":
                     current_case["sort_date"] = extract_date_for_sort(text)
-                if current_case["sort_company"] == "ZZZ":
-                    current_case["sort_company"] = extract_company_for_sort(text)
+                
+                # 重新檢查公司名稱 (避免第一次只抓到標題)
+                extracted_comp = extract_company_for_sort(current_case["case_info"])
+                if extracted_comp != "ZZZ":
+                    current_case["sort_company"] = extracted_comp
                 
                 if not current_case["raw_case_no"]:
                     extracted_no = extract_patent_number_from_text(text)
@@ -234,7 +244,7 @@ with st.sidebar:
         all_cases = []
         status_report_list = []
         
-        # 1. 處理所有 Word
+        # 1. 處理 Word
         for word_file in word_files:
             cases = parse_word_file(word_file)
             all_cases.extend(cases)
@@ -248,7 +258,7 @@ with st.sidebar:
 
         match_count = 0
         
-        with st.spinner("正在處理資料..."):
+        with st.spinner("正在處理..."):
             for case in all_cases:
                 case_key = case["raw_case_no"]
                 target_fig = case["rep_fig_text"]
@@ -256,8 +266,8 @@ with st.sidebar:
                 status = {
                     "來源檔案": case["source_file"],
                     "案號": case_key if case_key else "(無法辨識)",
-                    "申請人/公司": case["sort_company"] if case["sort_company"] != "ZZZ" else "(未找到)",
-                    "日期": case["sort_date"] if case["sort_date"] != "99999999" else "(未找到)",
+                    "排序抓取值 (公司)": case["sort_company"], # 診斷用
+                    "排序抓取值 (日期)": case["sort_date"],    # 診斷用
                     "圖片狀態": "未處理",
                     "錯誤原因": "",
                     "缺漏欄位": ", ".join(case["missing_fields"]) if case["missing_fields"] else "無"
@@ -292,19 +302,16 @@ with st.sidebar:
                 
                 status_report_list.append(status)
 
-        # 3. 排序邏輯
-        # 第一順位: 公司 (字串排序，相同會排一起)
-        # 第二順位: 日期 (YYYYMMDD 字串排序，數值小=日期早，預設升冪排列即為「早到晚」)
-        all_cases.sort(key=lambda x: (x["sort_company"], x["sort_date"]))
-        
-        status_report_list.sort(key=lambda x: (x["申請人/公司"], x["日期"]))
+        # 3. 排序邏輯 (公司名稱不分大小寫排序)
+        all_cases.sort(key=lambda x: (x["sort_company"].upper(), x["sort_date"]))
+        status_report_list.sort(key=lambda x: (x["排序抓取值 (公司)"].upper(), x["排序抓取值 (日期)"]))
 
         if all_cases:
             st.session_state['slides_data'] = all_cases
             st.session_state['status_report'] = status_report_list
             st.success(f"處理完成！共 {len(all_cases)} 筆，成功截取 {match_count} 張圖。")
         else:
-            st.warning("所有 Word 檔案皆解析無資料。")
+            st.warning("Word 解析無資料。")
 
     if st.session_state['slides_data']:
         st.divider()
@@ -317,17 +324,16 @@ with st.sidebar:
 if not st.session_state['slides_data']:
     st.info("👈 請上傳檔案。")
 else:
-    # === 1. 簡報預覽 (放在最上面) ===
-    st.subheader(f"📋 簡報預覽 (依 申請人 -> 日期(早到晚) 排序)")
+    # 1. 預覽
+    st.subheader(f"📋 簡報預覽 (已排序)")
     cols = st.columns(3)
     for i, data in enumerate(st.session_state['slides_data']):
         with cols[i % 3]:
             with st.container(border=True):
                 st.markdown(f"**第 {i+1} 頁**")
-                # 顯示排序資訊供檢查
+                # 顯示排序鍵值供檢查
                 st.caption(f"{data['sort_company']} | {data['sort_date']}")
-                
-                st.text(data['case_info'][:100] + "...") 
+                st.text(data['case_info'][:100] + "...")
                 
                 if data['image_data']:
                     st.image(data['image_data'], use_column_width=True)
@@ -335,19 +341,17 @@ else:
                     raw_text = data.get('rep_fig_text', "")
                     display_text = raw_text if raw_text and raw_text.strip() else "(Word中無代表圖資訊)"
                     st.warning(f"無圖片，將填入文字：\n{display_text[:50]}...")
-                
                 st.caption(f"重點：{data['key_point']}")
-    
-    # 下載按鈕 (緊接在預覽後)
+
+    # 下載
     def generate_ppt(slides_data):
         prs = Presentation()
         prs.slide_width = Inches(13.333)
         prs.slide_height = Inches(7.5)
-
         for data in slides_data:
             slide = prs.slides.add_slide(prs.slide_layouts[6])
 
-            # 1. 左上：案號
+            # 左上
             left, top, width, height = Inches(0.5), Inches(0.5), Inches(5.0), Inches(2.0)
             txBox = slide.shapes.add_textbox(left, top, width, height)
             tf = txBox.text_frame
@@ -359,15 +363,13 @@ else:
                     p.text = line.strip()
                     p.font.size = Pt(20)
                     p.font.bold = True
-                    p.font.color.rgb = RGBColor(0, 0, 0)
                     p.alignment = PP_ALIGN.LEFT
-            
-            # 2. 右上：綠框區域
+
+            # 右上
             img_left = Inches(5.5)
             img_top = Inches(0.5)
             img_height = Inches(4.0)
             img_width = Inches(7.0)
-
             if data['image_data']:
                 image_stream = BytesIO(data['image_data'])
                 slide.shapes.add_picture(image_stream, img_left, img_top, height=img_height)
@@ -375,20 +377,17 @@ else:
                 txBox = slide.shapes.add_textbox(img_left, img_top, img_width, img_height)
                 tf = txBox.text_frame
                 tf.word_wrap = True
-                
                 raw_text = data.get('rep_fig_text', "")
                 content_text = raw_text if raw_text and raw_text.strip() else "(Word中無代表圖資訊)"
-                
                 lines = content_text.split('\n')
                 for line in lines:
                     if line.strip():
                         p = tf.add_paragraph()
                         p.text = line.strip()
                         p.font.size = Pt(16)
-                        p.font.bold = False
                         p.alignment = PP_ALIGN.LEFT
 
-            # 3. 中下：文字區
+            # 中下 & 底部
             left, top, width, height = Inches(0.5), Inches(4.8), Inches(12.3), Inches(1.5)
             txBox = slide.shapes.add_textbox(left, top, width, height)
             tf = txBox.text_frame
@@ -401,7 +400,6 @@ else:
             p2.text = "• 發明精神：" + data['spirit']
             p2.font.size = Pt(18)
 
-            # 4. 底部：重點
             left, top, width, height = Inches(0.5), Inches(6.5), Inches(12.3), Inches(0.8)
             shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
             shape.fill.solid()
@@ -412,9 +410,7 @@ else:
             p.alignment = PP_ALIGN.CENTER
             p.font.size = Pt(20)
             p.font.bold = True
-            p.font.color.rgb = RGBColor(0, 0, 0)
             shape.text_frame.vertical_anchor = MSO_SHAPE.RECTANGLE
-
         return prs
 
     st.divider()
@@ -423,23 +419,11 @@ else:
         binary_output = BytesIO()
         prs.save(binary_output)
         binary_output.seek(0)
-        st.download_button(
-            label="📥 下載 PPT",
-            data=binary_output,
-            file_name="sorted_slides.pptx",
-            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
-        )
+        st.download_button("📥 下載 PPT", binary_output, "final_slides.pptx")
 
-    # === 2. 顯示診斷報告 (放在最下面) ===
+    # 2. 診斷表格 (放在下面)
     st.divider()
     st.subheader("📊 處理結果診斷報告")
     if st.session_state['status_report']:
         df = pd.DataFrame(st.session_state['status_report'])
-        st.dataframe(
-            df, 
-            hide_index=True,
-            column_config={
-                "圖片狀態": st.column_config.TextColumn("狀態", width="small"),
-                "錯誤原因": st.column_config.TextColumn("錯誤詳細原因", width="large"),
-            }
-        )
+        st.dataframe(df, hide_index=True)
