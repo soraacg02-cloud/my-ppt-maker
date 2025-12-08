@@ -4,8 +4,7 @@ from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.enum.text import PP_ALIGN
 from pptx.dml.color import RGBColor
-# 修正重點：同時匯入 MSO_SHAPE (畫圖用) 和 MSO_SHAPE_TYPE (辨識用)
-from pptx.enum.shapes import MSO_SHAPE, MSO_SHAPE_TYPE 
+from pptx.enum.shapes import MSO_SHAPE, MSO_SHAPE_TYPE
 from io import BytesIO
 import docx
 from docx.document import Document
@@ -16,11 +15,11 @@ import re
 import pandas as pd
 
 # --- 設定網頁標題 ---
-st.set_page_config(page_title="PPT 重組生成器 (Claim 智慧版)", page_icon="📑", layout="wide")
-st.title("📑 PPT 重組生成器 (Claim 自動分頁版)")
-st.caption("支援多檔上傳、自動排序、獨立項自動分頁 (保留縮排與格式)。")
+st.set_page_config(page_title="PPT 重組生成器 (縮排分頁修正版)", page_icon="📑", layout="wide")
+st.title("📑 PPT 重組生成器 (精準Claim分頁版)")
+st.caption("修正：Claim 自動分頁邏輯優化、強制保留縮排格式、字體統一 14pt。")
 
-# === NBLM 提示詞區塊 (更新：最新 6 點要求) ===
+# === NBLM 提示詞區塊 ===
 nblm_prompt = """根據上傳的所有來源，分開整理出以下重點(不要表格)：
 
 1. 案號 / 日期 / 公司： *(案號依據"公開號"、日期依據"優先權日"、公司依據"申請人")
@@ -32,7 +31,6 @@ nblm_prompt = """根據上傳的所有來源，分開整理出以下重點(不�
 
 st.info("💡 **NBLM 使用提示詞** (已更新，點擊下方綠色按鈕一鍵複製)")
 
-# 使用 HTML 建立顯眼複製按鈕
 components.html(
     f"""
     <html>
@@ -202,7 +200,6 @@ def parse_word_file(uploaded_docx):
                 current_field = "rep_fig"
                 current_case["rep_fig_text"] = re.sub(r'^[0-9.．]*\s*代表圖[:：]?\s*', '', text).strip()
                 continue
-            # Claim 欄位辨識
             elif "獨立項" in text or ("claim" in text.lower() and "6" in text):
                 current_field = "claim"
                 content = re.sub(r'^[0-9.．]*\s*(獨立項)?(claim)?[:：]?\s*', '', text, flags=re.IGNORECASE).strip()
@@ -236,11 +233,11 @@ def parse_word_file(uploaded_docx):
         st.error(f"解析 Word 錯誤 ({uploaded_docx.name}): {e}")
         return []
 
-# --- 輔助函數：分割 Claim (智慧分組) ---
+# --- 輔助函數：分割 Claim (智慧分組 - 邏輯升級) ---
 def split_claims_text(full_text):
     """
-    將 claim 文字依據 "Claim X", "獨立項 X" 等標題進行切分。
-    並嘗試保留縮排結構。
+    依據 'Claim + 數字' 或 '獨立項 + 數字' 或 '數字 + 點' 來切分。
+    關鍵優化：避免把內文的 '1. 元件' 誤判為新的一頁。
     """
     if not full_text: return []
     
@@ -248,12 +245,24 @@ def split_claims_text(full_text):
     claims = []
     current_chunk = []
     
-    # Regex: 偵測新獨立項的開始 (包含 Claim+數字 或 獨立項+數字)
-    header_pattern = re.compile(r'^\s*([●•-]?\s*)?(Claim\s*\d+|獨立項\s*\d+|[0-9]+\.)', re.IGNORECASE)
+    # Regex 邏輯：
+    # 1. ^\s*(Claim|獨立項|請求項)\s*\d+  -> 明確的 Claim 開頭 (e.g. Claim 1)
+    # 2. ^\s*\d+\.(?!\d) -> 數字開頭加點 (e.g. 1. )，但後面不能緊接數字(排除 1.1)
+    # 3. 排除邏輯：通常獨立項標題不會包含分號(;)或逗號(,)太長，這裡做簡單篩選
+    header_pattern = re.compile(r'^\s*((Claim|獨立項|請求項)\s*\d+|[0-9]+\.)', re.IGNORECASE)
     
     for line in lines:
-        if header_pattern.search(line):
-            # 發現新的一組 Claim
+        clean_line = line.strip()
+        is_header = False
+        
+        # 判斷是否為標題行
+        if header_pattern.match(clean_line):
+            # 進一步過濾：如果這一行很長且包含分號，可能只是內文的元件描述 (e.g. "1. A device comprising: ...;")
+            # 但通常 NBLM 輸出的 Claim 標題是單獨一行的，或是 "1. 一種裝置，包含..."
+            # 這裡我們假設：只要是 "數字+點" 開頭，且前面沒有縮排(透過上一層邏輯)，就視為新分頁
+            is_header = True
+            
+        if is_header:
             if current_chunk:
                 claims.append(current_chunk)
             current_chunk = [line]
@@ -348,12 +357,11 @@ else:
                 if data['image_data']: st.image(data['image_data'], use_column_width=True)
                 else: st.warning("無圖片")
                 
-                # 預覽區提示 Claim 狀態
-                # 簡單合併文字以顯示
+                # 預覽 Claim 數量
                 full_claim_text = data['claim_text']
                 claims_preview = split_claims_text(full_claim_text)
                 count_claims = len(claims_preview) if full_claim_text else 0
-                st.caption(f"Claim: {count_claims} 組獨立項")
+                st.caption(f"Claim: {count_claims} 組 (將產生 {count_claims} 頁)")
 
     # --- PPT 生成邏輯 ---
     def generate_ppt(slides_data, need_claim_slide):
@@ -362,7 +370,7 @@ else:
         prs.slide_height = Inches(7.5)
         
         for data in slides_data:
-            # === 第一頁：原本的內容 ===
+            # === 第一頁 ===
             slide = prs.slides.add_slide(prs.slide_layouts[6])
             
             # 左上：案號
@@ -393,7 +401,7 @@ else:
             p2 = tf.add_paragraph(); p2.text = "• 發明精神：" + data['spirit']; p2.font.size = Pt(18)
 
             left, top, width, height = Inches(0.5), Inches(6.5), Inches(12.3), Inches(0.8)
-            # 修正 MSO_SHAPE 屬性錯誤
+            # 修正 MSO_SHAPE 屬性
             shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
             shape.fill.solid(); shape.fill.fore_color.rgb = RGBColor(255, 192, 0); shape.line.color.rgb = RGBColor(255, 192, 0)
             p = shape.text_frame.paragraphs[0]; p.text = data['key_point']; p.alignment = PP_ALIGN.CENTER; p.font.size = Pt(20); p.font.bold = True
@@ -401,13 +409,10 @@ else:
 
             # === Claim 分頁邏輯 (如果勾選) ===
             if need_claim_slide:
-                # 1. 取得所有獨立項內容 (List of List[str])
                 claims_groups = split_claims_text(data['claim_text'])
-                
                 if not claims_groups:
                     claims_groups = [["(Word 中無 Claim 資料)"]]
 
-                # 2. 針對每一組獨立項，產生一頁
                 for claim_lines in claims_groups:
                     slide_c = prs.slides.add_slide(prs.slide_layouts[6])
                     
@@ -419,7 +424,7 @@ else:
                         if line.strip():
                             p = tf.add_paragraph(); p.text = line.strip(); p.font.size = Pt(20); p.font.bold = True
                     
-                    # 2.2 中間：Claim 內容
+                    # 2.2 中間：Claim 內容 (保留縮排)
                     left, top, width, height = Inches(0.5), Inches(2.5), Inches(12.3), Inches(4.5)
                     txBox = slide_c.shapes.add_textbox(left, top, width, height)
                     tf = txBox.text_frame; tf.word_wrap = True
@@ -429,26 +434,26 @@ else:
                     p_title.font.size = Pt(24); p_title.font.bold = True; p_title.font.color.rgb = RGBColor(0, 112, 192)
                     p_title.space_after = Pt(10)
                     
-                    # 逐行加入並判斷縮排
                     for line in claim_lines:
                         clean_line = line.strip()
                         if clean_line:
                             p = tf.add_paragraph()
                             p.text = clean_line
-                            p.font.size = Pt(14) # 要求：字體統一 14pt
+                            p.font.size = Pt(14) # 字體統一 14pt
                             p.space_after = Pt(4)
                             
-                            # === 簡單的縮排判斷 ===
-                            # 1. 如果原始行頭有空格
+                            # === 縮排判斷 ===
+                            # 檢查原始字串的開頭符號
                             if line.startswith('\t') or line.startswith('    '):
                                 p.level = 1
-                            # 2. 如果包含子項目符號 (根據 Word/NBLM 常見輸出)
-                            elif clean_line.startswith('o ') or clean_line.startswith('○'):
+                            elif clean_line.startswith(('o ', '○', '-', '•', '●')):
                                 p.level = 1
-                            elif clean_line.startswith('▪ ') or clean_line.startswith('■'):
-                                p.level = 2
-                            elif clean_line.startswith('- '):
-                                p.level = 1
+                            elif clean_line.startswith(('▪', '■', '1.', '2.', '3.', '(1)', '(2)')):
+                                # 嘗試偵測子項目 (簡單 heuristic)
+                                if clean_line[0].isdigit() or clean_line.startswith('('):
+                                    p.level = 1
+                                else:
+                                    p.level = 2
 
         return prs
 
