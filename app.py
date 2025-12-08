@@ -10,9 +10,9 @@ import fitz  # PyMuPDF
 import re
 
 # --- 設定網頁標題 ---
-st.set_page_config(page_title="PPT 重組生成器 (精準修正版)", page_icon="📑", layout="wide")
-st.title("📑 PPT 重組生成器 (代表圖文字修正版)")
-st.caption("修正：解決代表圖包含數字時會被誤刪的問題，並新增原始資料檢查功能。")
+st.set_page_config(page_title="PPT 重組生成器 (邏輯修復版)", page_icon="📑", layout="wide")
+st.title("📑 PPT 重組生成器 (邏輯修復版)")
+st.caption("修正：解決因內文包含「公司/日期」等關鍵字，導致代表圖文字被截斷或消失的問題。")
 
 # --- 初始化 Session State ---
 if 'slides_data' not in st.session_state:
@@ -25,9 +25,17 @@ def extract_specific_figure_from_pdf(pdf_stream, target_fig_text):
 
     try:
         doc = fitz.open(stream=pdf_stream, filetype="pdf")
-        # 只取第一行搜尋
-        search_keyword = target_fig_text.split('\n')[0].strip()
-        # 移除空白以增加比對成功率
+        # 為了搜尋精確，只取第一行非空文字
+        lines = target_fig_text.split('\n')
+        search_keyword = ""
+        for line in lines:
+            if line.strip():
+                search_keyword = line.strip()
+                break
+        
+        if not search_keyword:
+            return None
+
         clean_target = search_keyword.replace(" ", "")
         
         found_page_index = None
@@ -59,7 +67,7 @@ def extract_patent_number_from_text(text):
         return match.group(1)
     return ""
 
-# --- 函數：解析 Word 檔案 (修正代表圖抓取邏輯) ---
+# --- 函數：解析 Word 檔案 (嚴格狀態機版) ---
 def parse_word_file(uploaded_docx):
     try:
         doc = docx.Document(uploaded_docx)
@@ -71,80 +79,109 @@ def parse_word_file(uploaded_docx):
         }
         current_field = None 
         
-        # 用來Debug用的原始紀錄
         debug_raw_lines = []
 
         for para in doc.paragraphs:
             text = para.text.strip()
             if not text: continue
             
-            debug_raw_lines.append(text) # 紀錄原始文字供檢查
-
-            # --- 關鍵字判斷 ---
-            
-            # 1. 案號 / 日期 / 公司
-            if any(k in text for k in ["案號", "日期", "申請日", "索號", "公司"]):
-                if ("案號" in text or "索號" in text) and current_case["case_info"] and current_field != "case_info_block":
+            # --- 1. 最高優先級：判斷是否為「新案件」的開始 (案號/索號) ---
+            if "案號" in text or "索號" in text:
+                # 只有遇到這兩個字，才百分之百確定是新的一案，或是該案的開頭
+                
+                # 如果已經有累積的資料，且不是正在寫同一個案號區塊，則存檔
+                if current_case["case_info"] and current_field != "case_info_block":
                     cases.append(current_case)
                     current_case = {
                         "case_info": "", "problem": "", "spirit": "", "key_point": "", "rep_fig_text": "",
                         "image_data": None, "image_name": "Word匯入", "raw_case_no": ""
                     }
+                
                 current_field = "case_info_block"
+                # 這裡直接賦值，不使用 +=，因為這是一案的起點
+                current_case["case_info"] = text 
                 
-                if current_case["case_info"]:
-                    current_case["case_info"] += "\n" + text
-                else:
-                    current_case["case_info"] = text
-                
-                extracted_no = extract_patent_number_from_text(current_case["case_info"])
+                extracted_no = extract_patent_number_from_text(text)
                 if extracted_no:
                     current_case["raw_case_no"] = extracted_no
+                
+                debug_raw_lines.append(f"[Start Case] {text}")
+                continue # 處理完就換下一行
 
-            # 2. 解決問題
-            elif "解決問題" in text:
+            # --- 2. 判斷是否為其他「欄位標題」 ---
+            
+            if "解決問題" in text:
                 current_field = "problem"
-                # 使用 Regex 移除標題，避免誤刪內容
                 content = re.sub(r'^[0-9.．]*\s*解決問題[:：]?\s*', '', text)
                 current_case["problem"] = content
+                debug_raw_lines.append(f"[Field: Problem] {text}")
+                continue
 
-            # 3. 發明精神
             elif "發明精神" in text:
                 current_field = "spirit"
                 content = re.sub(r'^[0-9.．]*\s*發明精神[:：]?\s*', '', text)
                 current_case["spirit"] = content
+                debug_raw_lines.append(f"[Field: Spirit] {text}")
+                continue
 
-            # 4. 一句重點
             elif "重點" in text:
                 current_field = "key_point"
                 content = re.sub(r'^[0-9.．]*\s*(一句)?重點[:：]?\s*', '', text)
                 current_case["key_point"] = content
+                debug_raw_lines.append(f"[Field: KeyPoint] {text}")
+                continue
 
-            # 5. 代表圖 (修正重點)
             elif "代表圖" in text:
                 current_field = "rep_fig"
-                # 舊邏輯: text.replace("5", "") -> 錯誤！會把內容的 5 刪掉
-                # 新邏輯: 使用 Regex 只移除「開頭的編號」和「代表圖」標籤
-                # 說明: ^[0-9.．]* 匹配開頭的數字和點, \s*代表圖[:：]? 匹配代表圖和冒號
                 content = re.sub(r'^[0-9.．]*\s*代表圖[:：]?\s*', '', text).strip()
                 current_case["rep_fig_text"] = content
+                debug_raw_lines.append(f"[Field: RepFig] {text}")
+                continue
 
+            # --- 3. 處理內容續行 (關鍵修正點) ---
+            
+            # 只有當目前還在 "case_info_block" (也就是左上角資訊區) 時，
+            # 我們才把 "日期"、"申請日"、"公司" 當作資訊標題來處理。
+            # 如果已經進入了 "代表圖" 或 "解決問題"，就算內文有 "公司"，也只是普通文字。
+            
+            is_header_keyword = any(k in text for k in ["日期", "申請日", "公司"])
+            
+            if current_field == "case_info_block":
+                # 在資訊區塊，不管是不是關鍵字，都視為資訊的一部分
+                current_case["case_info"] += "\n" + text
+                # 隨時更新案號抓取
+                extracted_no = extract_patent_number_from_text(current_case["case_info"])
+                if extracted_no:
+                    current_case["raw_case_no"] = extracted_no
+                debug_raw_lines.append(f"  -> Add to CaseInfo: {text}")
+
+            elif current_field == "rep_fig":
+                # 在代表圖區塊，所有文字(包含換行、包含關鍵字)都屬於代表圖
+                current_case["rep_fig_text"] += "\n" + text
+                debug_raw_lines.append(f"  -> Add to RepFig: {text}")
+
+            elif current_field == "problem":
+                current_case["problem"] += "\n" + text
+                debug_raw_lines.append(f"  -> Add to Problem: {text}")
+
+            elif current_field == "spirit":
+                current_case["spirit"] += "\n" + text
+                debug_raw_lines.append(f"  -> Add to Spirit: {text}")
+
+            elif current_field == "key_point":
+                current_case["key_point"] += "\n" + text
+                debug_raw_lines.append(f"  -> Add to KeyPoint: {text}")
+                
             else:
-                # 續行文字處理
-                if current_field == "case_info_block":
-                    current_case["case_info"] += "\n" + text
-                    extracted_no = extract_patent_number_from_text(current_case["case_info"])
-                    if extracted_no:
-                        current_case["raw_case_no"] = extracted_no
-                elif current_field in ["problem", "spirit", "key_point"]:
-                    current_case[current_field] += "\n" + text
-                elif current_field == "rep_fig":
-                    current_case["rep_fig_text"] += "\n" + text 
+                # 沒欄位歸屬的游離文字，暫時忽略或依需求處理
+                debug_raw_lines.append(f"[Ignored] {text}")
 
+        # 迴圈結束，存最後一筆
         if current_case["case_info"]:
             cases.append(current_case)
             
         return cases, debug_raw_lines
+
     except Exception as e:
         st.error(f"解析 Word 時發生錯誤: {e}")
         return [], []
@@ -158,9 +195,9 @@ with st.sidebar:
     if word_file and st.button("🔄 開始智能整合", type="primary"):
         extracted_cases, raw_lines = parse_word_file(word_file)
         
-        # 顯示原始資料檢查器 (Debug用)
-        with st.expander("🔍 檢查 Word 讀取到的內容 (若有問題請看這)", expanded=False):
-            st.write(raw_lines)
+        # Debug 資訊
+        with st.expander("🔍 檢查 Word 解析邏輯 (Debug)", expanded=False):
+            st.text("\n".join(raw_lines))
         
         # 讀取 PDF
         pdf_file_map = {}
@@ -210,7 +247,7 @@ with st.sidebar:
 
 # --- 主畫面 ---
 if not st.session_state['slides_data']:
-    st.info("👈 請上傳檔案。此版本修正了「代表圖」文字被誤刪的問題。")
+    st.info("👈 請上傳檔案。")
 else:
     st.subheader(f"📋 預覽")
     cols = st.columns(3)
@@ -223,7 +260,9 @@ else:
                 if data['image_data']:
                     st.image(data['image_data'], use_column_width=True)
                 else:
-                    st.info(f"無圖片，將填入：\n{data['rep_fig_text']}")
+                    # 顯示文字內容
+                    display_text = data['rep_fig_text'] if data['rep_fig_text'].strip() else "(Word中無代表圖資訊)"
+                    st.info(f"無圖片，將填入：\n{display_text}")
                 
                 st.caption(f"重點：{data['key_point']}")
 
@@ -269,7 +308,6 @@ else:
                 tf = txBox.text_frame
                 tf.word_wrap = True
                 
-                # 確保即便 Word 讀到的是空字串，也不會報錯，並顯示提示
                 content_text = data['rep_fig_text'] if data['rep_fig_text'].strip() else "(Word中無代表圖資訊)"
                 
                 lines = content_text.split('\n')
@@ -322,6 +360,6 @@ else:
         st.download_button(
             label="📥 下載 PPT",
             data=binary_output,
-            file_name="fixed_parser_slides.pptx",
+            file_name="fixed_logic_slides.pptx",
             mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
         )
