@@ -3,127 +3,182 @@ from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.enum.text import PP_ALIGN
 from pptx.dml.color import RGBColor
-# 修正點：同時引入 MSO_SHAPE (畫形狀用) 和 MSO_SHAPE_TYPE (辨識圖片用)
 from pptx.enum.shapes import MSO_SHAPE, MSO_SHAPE_TYPE
 from io import BytesIO
+import docx # 引入 python-docx 用來讀取 Word 檔
 
 # --- 設定網頁標題 ---
 st.set_page_config(page_title="PPT 重組生成器", page_icon="📑", layout="wide")
-st.title("📑 PPT 重組生成器 (讀取舊 PPT 產出新格式)")
-st.caption("上傳既有的 PPT 檔案，自動提取其中的圖片並重新排版。")
+st.title("📑 PPT 自動化生成器 (支援 Word/PPT 匯入)")
+st.caption("支援多來源匯入：可上傳 Word 自動拆解多案，或上傳 PPT 提取圖文。")
 
 # --- 初始化 Session State ---
 if 'slides_data' not in st.session_state:
     st.session_state['slides_data'] = []
 
-# --- 函數：從 PPT 中提取圖片與文字 ---
+# --- 函數 1：從 PPT 中提取圖片與文字 (既有功能) ---
 def extract_data_from_pptx(uploaded_pptx):
-    """
-    讀取上傳的 PPT，回傳：
-    1. 找到的第一張圖片的 binary data (若無則 None)
-    2. 找到的所有文字內容 (字串)
-    """
     try:
         prs = Presentation(uploaded_pptx)
-        # 預設只讀取第一張投影片
-        slide = prs.slides[0]
-        
+        slide = prs.slides[0] # 預設只讀第一頁
         extracted_img = None
         extracted_text = []
 
-        # 遍歷所有物件
         for shape in slide.shapes:
-            # 1. 抓取圖片 (使用 MSO_SHAPE_TYPE.PICTURE)
             if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
-                # 只抓第一張找到的圖片
                 if extracted_img is None:
                     extracted_img = shape.image.blob
-            
-            # 2. 抓取文字
             if shape.has_text_frame:
                 for paragraph in shape.text_frame.paragraphs:
                     if paragraph.text.strip():
                         extracted_text.append(paragraph.text.strip())
-        
         return extracted_img, "\n".join(extracted_text)
-    
     except Exception as e:
         st.error(f"解析 PPT 時發生錯誤: {e}")
         return None, ""
 
-# --- 側邊欄：輸入資料區域 ---
-with st.sidebar:
-    st.header("1. 上傳原始資料")
-    
-    # 上傳 PPTX 檔案
-    uploaded_file = st.file_uploader(
-        "上傳原始 PPT 檔案 (.pptx)", 
-        type=['pptx'], 
-        help="系統將會自動抓取此 PPT 內的第一張圖片作為圖示。"
-    )
+# --- 函數 2：從 Word 中批次提取多案資料 (新增功能) ---
+def parse_word_file(uploaded_docx):
+    """
+    解析 Word 檔案，依據關鍵字自動拆解成多筆資料。
+    假設格式為：
+    案號：xxx
+    解決問題：yyy
+    發明精神：zzz
+    一句重點：aaa
+    (重複循環)
+    """
+    try:
+        doc = docx.Document(uploaded_docx)
+        cases = []
+        # 初始化一個暫存的案子資料
+        current_case = {"case_info": "", "problem": "", "spirit": "", "key_point": "", "image_data": None, "image_name": "Word匯入"}
+        current_field = None # 記錄目前正在讀取哪個欄位
 
-    # 暫存變數
-    ppt_image_blob = None
-    extracted_txt_content = ""
+        for para in doc.paragraphs:
+            text = para.text.strip()
+            if not text: continue # 跳過空行
 
-    if uploaded_file:
-        with st.spinner("正在分析 PPT 內容..."):
-            ppt_image_blob, extracted_txt_content = extract_data_from_pptx(uploaded_file)
-            
-            if ppt_image_blob:
-                st.success("✅ 已成功提取圖片！")
-                st.image(ppt_image_blob, caption="從 PPT 提取的圖片", use_column_width=True)
+            # 判斷關鍵字 (支援常見寫法)
+            if "案號" in text or "日期" in text:
+                # 如果已經有資料且又讀到「案號」，代表是下一筆案子，先儲存上一筆
+                if current_case["case_info"] and current_field != "case_info":
+                    cases.append(current_case)
+                    current_case = {"case_info": "", "problem": "", "spirit": "", "key_point": "", "image_data": None, "image_name": "Word匯入"}
+                
+                current_field = "case_info"
+                # 去除標籤文字
+                clean_text = text.replace("案號", "").replace("日期", "").replace("/", "").replace(":", "").replace("：", "").strip()
+                current_case["case_info"] = clean_text
+
+            elif "解決問題" in text:
+                current_field = "problem"
+                clean_text = text.replace("解決問題", "").replace(":", "").replace("：", "").strip()
+                current_case["problem"] = clean_text
+
+            elif "發明精神" in text:
+                current_field = "spirit"
+                clean_text = text.replace("發明精神", "").replace(":", "").replace("：", "").strip()
+                current_case["spirit"] = clean_text
+
+            elif "重點" in text:
+                current_field = "key_point"
+                clean_text = text.replace("一句重點", "").replace("重點", "").replace(":", "").replace("：", "").strip()
+                current_case["key_point"] = clean_text
+
             else:
-                st.warning("⚠️ 此 PPT 中找不到圖片。")
+                # 如果該行沒有關鍵字，但目前正在某個欄位中，則視為該欄位的續行 (多行文字)
+                if current_field:
+                    current_case[current_field] += "\n" + text
 
-            # 顯示提取的文字供參考
-            with st.expander("🔍 查看 PPT 內的文字 (可複製)", expanded=True):
-                st.text_area("原始文字內容", extracted_txt_content, height=150)
+        # 迴圈結束後，別忘了存最後一筆
+        if current_case["case_info"]:
+            cases.append(current_case)
+        
+        return cases
 
-    st.divider()
-    st.header("2. 填寫排版內容")
-    st.info("請參考上方提取的文字，填入下欄：")
+    except Exception as e:
+        st.error(f"解析 Word 時發生錯誤: {e}")
+        return []
 
-    # 輸入欄位
-    case_info = st.text_input("案號 / 日期", placeholder="例如：US 11,531,238 B2 / 2020.05.09")
-    problem = st.text_area("解決問題", placeholder="描述此專利解決了什麼技術問題...")
-    spirit = st.text_area("發明精神", placeholder="描述此發明的核心精神或技術手段...")
-    key_point = st.text_input("一句重點", placeholder="例如：第一與第二基板上的配向層方向相互垂直...")
+# --- 側邊欄 ---
+with st.sidebar:
+    st.header("1. 匯入資料來源")
+    
+    # 頁籤：選擇匯入方式
+    import_mode = st.radio("選擇匯入方式", ["手動輸入 / PPT 提取", "Word 批次匯入"])
 
-    # 新增按鈕
-    if st.button("➕ 加入此頁到簡報", type="primary"):
-        if case_info and problem and spirit and key_point:
-            
-            # 圖片處理
-            image_data_to_save = ppt_image_blob
-            image_name_str = uploaded_file.name if uploaded_file else "無圖片"
+    if import_mode == "Word 批次匯入":
+        st.info("請上傳 Word 檔 (.docx)，系統將依據「案號」、「解決問題」等關鍵字自動分頁。")
+        word_file = st.file_uploader("上傳 Word 檔案", type=['docx'])
+        
+        if word_file:
+            if st.button("🔄 開始解析 Word", type="primary"):
+                extracted_cases = parse_word_file(word_file)
+                if extracted_cases:
+                    st.session_state['slides_data'].extend(extracted_cases)
+                    st.success(f"成功匯入 {len(extracted_cases)} 筆資料！請看右側預覽。")
+                else:
+                    st.warning("未找到有效資料，請確認 Word 內容包含「案號」、「解決問題」等關鍵字。")
 
-            # 將資料存入 session_state
-            st.session_state['slides_data'].append({
-                "case_info": case_info,
-                "problem": problem,
-                "spirit": spirit,
-                "key_point": key_point,
-                "image_data": image_data_to_save,
-                "image_name": image_name_str
-            })
-            st.success(f"已新增第 {len(st.session_state['slides_data'])} 頁！")
-        else:
-            st.warning("⚠️ 請將四個文字欄位都填寫完整。")
+    else:
+        # --- 原有的 PPT / 手動輸入模式 ---
+        uploaded_file = st.file_uploader(
+            "上傳原始 PPT (.pptx) 以提取圖文", 
+            type=['pptx'],
+            help="自動抓取 PPT 第一張圖片與文字。"
+        )
 
-    # 清除所有資料按鈕
+        ppt_image_blob = None
+        extracted_txt_content = ""
+
+        if uploaded_file:
+            with st.spinner("分析 PPT 中..."):
+                ppt_image_blob, extracted_txt_content = extract_data_from_pptx(uploaded_file)
+                if ppt_image_blob:
+                    st.success("已提取圖片")
+                    st.image(ppt_image_blob, caption="PPT 圖片", use_column_width=True)
+                
+                with st.expander("查看 PPT 文字", expanded=True):
+                    st.text_area("內容", extracted_txt_content, height=100)
+
+        st.divider()
+        st.header("2. 編輯內容")
+        case_info = st.text_input("案號 / 日期")
+        problem = st.text_area("解決問題")
+        spirit = st.text_area("發明精神")
+        key_point = st.text_input("一句重點")
+
+        if st.button("➕ 加入此頁到簡報", type="primary"):
+            if case_info and problem and spirit and key_point:
+                image_data = ppt_image_blob
+                image_name = uploaded_file.name if uploaded_file else "無圖片"
+                
+                st.session_state['slides_data'].append({
+                    "case_info": case_info,
+                    "problem": problem,
+                    "spirit": spirit,
+                    "key_point": key_point,
+                    "image_data": image_data,
+                    "image_name": image_name
+                })
+                st.success("已新增頁面！")
+            else:
+                st.warning("請填寫所有欄位。")
+
+    # 清除按鈕
     if st.session_state['slides_data']:
         st.divider()
         if st.button("🗑️ 清除所有頁面"):
             st.session_state['slides_data'] = []
             st.rerun()
 
-# --- 主畫面：顯示已輸入的資料與下載 ---
+# --- 主畫面：預覽與下載 ---
 
 if not st.session_state['slides_data']:
-    st.info("👈 請從左側開始：先上傳 PPT，系統會自動抓圖，您只需填寫文字。")
+    st.info("👈 請從左側開始匯入資料。")
 else:
-    st.subheader(f"📋 預覽已輸入的 {len(st.session_state['slides_data'])} 頁內容")
+    st.subheader(f"📋 預覽 ({len(st.session_state['slides_data'])} 頁)")
     
     col_count = 0
     cols = st.columns(3)
@@ -132,11 +187,11 @@ else:
         with cols[col_count % 3]:
             with st.container(border=True):
                 st.markdown(f"#### 第 {i+1} 頁")
-                st.text(f"來源：{data['image_name']}")
+                st.text(f"案號：{data['case_info']}")
                 if data['image_data']:
                     st.image(data['image_data'], use_column_width=True)
                 else:
-                    st.markdown("*[未偵測到圖片]*")
+                    st.markdown("*(無圖片)*")
                 st.markdown(f"**重點：** {data['key_point']}")
         col_count += 1
 
@@ -149,7 +204,7 @@ else:
         prs.slide_height = Inches(7.5)
 
         for data in slides_data:
-            slide = prs.slides.add_slide(prs.slide_layouts[6]) # 空白版型
+            slide = prs.slides.add_slide(prs.slide_layouts[6])
 
             # 1. 案號 (左上)
             left, top, width, height = Inches(0.5), Inches(0.5), Inches(5.0), Inches(1.0)
@@ -159,10 +214,9 @@ else:
             p.font.size = Pt(24)
             p.font.bold = True
             
-            # 2. 圖片 (右上 - 使用從 PPT 提取的資料)
+            # 2. 圖片 (右上)
             if data['image_data']:
                 image_stream = BytesIO(data['image_data'])
-                # 設定位置與高度限制
                 slide.shapes.add_picture(image_stream, Inches(5.5), Inches(0.5), height=Inches(4.0))
 
             # 3. 文字區 (中下)
@@ -182,7 +236,6 @@ else:
 
             # 4. 重點 (底部黃底)
             left, top, width, height = Inches(0.5), Inches(6.5), Inches(12.3), Inches(0.8)
-            # 修正點：這裡改回使用 MSO_SHAPE.RECTANGLE
             shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
             shape.fill.solid()
             shape.fill.fore_color.rgb = RGBColor(255, 192, 0)
@@ -198,7 +251,6 @@ else:
 
         return prs
 
-    # --- 下載按鈕 ---
     if st.button("🚀 生成 PowerPoint (.pptx)", type="primary"):
         prs = generate_ppt(st.session_state['slides_data'])
         binary_output = BytesIO()
@@ -206,8 +258,8 @@ else:
         binary_output.seek(0)
         
         st.download_button(
-            label="📥 點擊下載您的簡報",
+            label="📥 下載 PPT",
             data=binary_output,
-            file_name="organized_patent_slides.pptx",
+            file_name="auto_generated_slides.pptx",
             mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
         )
