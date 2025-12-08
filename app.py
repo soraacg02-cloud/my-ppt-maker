@@ -10,64 +10,95 @@ import fitz  # PyMuPDF
 import re
 
 # --- 設定網頁標題 ---
-st.set_page_config(page_title="PPT 重組生成器 (邏輯修復版)", page_icon="📑", layout="wide")
-st.title("📑 PPT 重組生成器 (邏輯修復版)")
-st.caption("修正：解決因內文包含「公司/日期」等關鍵字，導致代表圖文字被截斷或消失的問題。")
+st.set_page_config(page_title="PPT 重組生成器 (智慧搜圖版)", page_icon="📑", layout="wide")
+st.title("📑 PPT 重組生成器 (智慧圖號提取版)")
+st.caption("修正：自動從詳細的代表圖說明中提取「圖號」(如 FIG. 3E)，解決因說明文字過長導致搜圖失敗的問題。")
 
 # --- 初始化 Session State ---
 if 'slides_data' not in st.session_state:
     st.session_state['slides_data'] = []
 
-# --- 函數：依據關鍵字搜尋 PDF 並截圖 ---
+# --- 函數：依據關鍵字搜尋 PDF 並截圖 (升級版) ---
 def extract_specific_figure_from_pdf(pdf_stream, target_fig_text):
+    """
+    從 target_fig_text (代表圖說明) 中提取圖號，並在 PDF 中搜尋該圖號。
+    """
     if not target_fig_text:
-        return None
+        return None, "無文字"
 
     try:
         doc = fitz.open(stream=pdf_stream, filetype="pdf")
-        # 為了搜尋精確，只取第一行非空文字
+        
+        # --- 步驟 1: 智慧提取圖號 ---
+        # 我們不要拿整行去搜，只抓像 "FIG. 3E", "Figure 1", "圖2" 這樣的關鍵字
+        # Regex 解釋:
+        # (?:FIG\.?|Figure|圖)  -> 匹配 FIG. 或 FIG 或 Figure 或 圖 (不分大小寫)
+        # \s* -> 允許中間有空白
+        # [0-9]+                -> 數字
+        # [A-Za-z]* -> 可選的英文後綴 (如 3E 的 E)
+        pattern = re.compile(r'((?:FIG\.?|Figure|圖)\s*[0-9]+[A-Za-z]*)', re.IGNORECASE)
+        
+        search_keywords = []
         lines = target_fig_text.split('\n')
-        search_keyword = ""
+        
+        # 掃描每一行，找出所有可能的圖號
         for line in lines:
-            if line.strip():
-                search_keyword = line.strip()
-                break
+            match = pattern.search(line)
+            if match:
+                # 抓到了！例如 "FIG. 3E"
+                # 去除空白，標準化 (例如 "FIG. 3E" -> "FIG.3E") 以利比對
+                raw_keyword = match.group(1)
+                clean_keyword = raw_keyword.replace(" ", "").upper()
+                search_keywords.append(clean_keyword)
         
-        if not search_keyword:
-            return None
+        # 如果 Regex 沒抓到 (例如使用者只寫 "參考下圖")，只好用第一行的前10個字試試看
+        if not search_keywords:
+             first_line = lines[0].strip()
+             if first_line:
+                 search_keywords.append(first_line[:10].replace(" ", "").upper())
 
-        clean_target = search_keyword.replace(" ", "")
-        
+        # --- 步驟 2: 在 PDF 中搜尋 ---
         found_page_index = None
+        matched_keyword_log = ""
+
+        # 優先搜尋提取到的第一個圖號 (通常代表圖是第一個提到的)
+        target_keyword = search_keywords[0] if search_keywords else ""
+        
+        if not target_keyword:
+            return None, "無法識別圖號"
 
         for i, page in enumerate(doc):
             page_text = page.get_text()
-            clean_page_text = page_text.replace(" ", "")
-            if clean_target in clean_page_text:
+            # 移除空白與轉大寫來比對
+            clean_page_text = page_text.replace(" ", "").upper()
+            
+            if target_keyword in clean_page_text:
                 found_page_index = i
+                matched_keyword_log = target_keyword
                 break
         
         if found_page_index is not None:
             page = doc[found_page_index]
-            mat = fitz.Matrix(2, 2)
+            mat = fitz.Matrix(2, 2) # 放大 2 倍
             pix = page.get_pixmap(matrix=mat)
-            return pix.tobytes("png")
+            return pix.tobytes("png"), f"成功匹配: {matched_keyword_log}"
             
-        return None
+        return None, f"PDF中找不到: {target_keyword}"
 
     except Exception as e:
         print(f"PDF 解析錯誤: {e}")
-        return None
+        return None, f"錯誤: {str(e)}"
 
 # --- 函數：提取專利號 ---
 def extract_patent_number_from_text(text):
     clean_text = text.replace("：", ":").replace(" ", "")
+    # 支援 CN, TW, TWI, US 等格式
     match = re.search(r'([a-zA-Z]{2,4}\d+[a-zA-Z]?)', clean_text)
     if match:
         return match.group(1)
     return ""
 
-# --- 函數：解析 Word 檔案 (嚴格狀態機版) ---
+# --- 函數：解析 Word 檔案 (狀態機邏輯) ---
 def parse_word_file(uploaded_docx):
     try:
         doc = docx.Document(uploaded_docx)
@@ -85,11 +116,8 @@ def parse_word_file(uploaded_docx):
             text = para.text.strip()
             if not text: continue
             
-            # --- 1. 最高優先級：判斷是否為「新案件」的開始 (案號/索號) ---
+            # --- 1. 新案件判斷 (最高優先) ---
             if "案號" in text or "索號" in text:
-                # 只有遇到這兩個字，才百分之百確定是新的一案，或是該案的開頭
-                
-                # 如果已經有累積的資料，且不是正在寫同一個案號區塊，則存檔
                 if current_case["case_info"] and current_field != "case_info_block":
                     cases.append(current_case)
                     current_case = {
@@ -98,85 +126,56 @@ def parse_word_file(uploaded_docx):
                     }
                 
                 current_field = "case_info_block"
-                # 這裡直接賦值，不使用 +=，因為這是一案的起點
                 current_case["case_info"] = text 
-                
                 extracted_no = extract_patent_number_from_text(text)
                 if extracted_no:
                     current_case["raw_case_no"] = extracted_no
-                
-                debug_raw_lines.append(f"[Start Case] {text}")
-                continue # 處理完就換下一行
+                continue
 
-            # --- 2. 判斷是否為其他「欄位標題」 ---
-            
+            # --- 2. 欄位切換 ---
             if "解決問題" in text:
                 current_field = "problem"
                 content = re.sub(r'^[0-9.．]*\s*解決問題[:：]?\s*', '', text)
                 current_case["problem"] = content
-                debug_raw_lines.append(f"[Field: Problem] {text}")
                 continue
 
             elif "發明精神" in text:
                 current_field = "spirit"
                 content = re.sub(r'^[0-9.．]*\s*發明精神[:：]?\s*', '', text)
                 current_case["spirit"] = content
-                debug_raw_lines.append(f"[Field: Spirit] {text}")
                 continue
 
             elif "重點" in text:
                 current_field = "key_point"
                 content = re.sub(r'^[0-9.．]*\s*(一句)?重點[:：]?\s*', '', text)
                 current_case["key_point"] = content
-                debug_raw_lines.append(f"[Field: KeyPoint] {text}")
                 continue
 
             elif "代表圖" in text:
                 current_field = "rep_fig"
                 content = re.sub(r'^[0-9.．]*\s*代表圖[:：]?\s*', '', text).strip()
                 current_case["rep_fig_text"] = content
-                debug_raw_lines.append(f"[Field: RepFig] {text}")
                 continue
 
-            # --- 3. 處理內容續行 (關鍵修正點) ---
-            
-            # 只有當目前還在 "case_info_block" (也就是左上角資訊區) 時，
-            # 我們才把 "日期"、"申請日"、"公司" 當作資訊標題來處理。
-            # 如果已經進入了 "代表圖" 或 "解決問題"，就算內文有 "公司"，也只是普通文字。
-            
-            is_header_keyword = any(k in text for k in ["日期", "申請日", "公司"])
-            
+            # --- 3. 內容填充 ---
             if current_field == "case_info_block":
-                # 在資訊區塊，不管是不是關鍵字，都視為資訊的一部分
                 current_case["case_info"] += "\n" + text
-                # 隨時更新案號抓取
                 extracted_no = extract_patent_number_from_text(current_case["case_info"])
                 if extracted_no:
                     current_case["raw_case_no"] = extracted_no
-                debug_raw_lines.append(f"  -> Add to CaseInfo: {text}")
 
             elif current_field == "rep_fig":
-                # 在代表圖區塊，所有文字(包含換行、包含關鍵字)都屬於代表圖
                 current_case["rep_fig_text"] += "\n" + text
-                debug_raw_lines.append(f"  -> Add to RepFig: {text}")
 
             elif current_field == "problem":
                 current_case["problem"] += "\n" + text
-                debug_raw_lines.append(f"  -> Add to Problem: {text}")
 
             elif current_field == "spirit":
                 current_case["spirit"] += "\n" + text
-                debug_raw_lines.append(f"  -> Add to Spirit: {text}")
 
             elif current_field == "key_point":
                 current_case["key_point"] += "\n" + text
-                debug_raw_lines.append(f"  -> Add to KeyPoint: {text}")
-                
-            else:
-                # 沒欄位歸屬的游離文字，暫時忽略或依需求處理
-                debug_raw_lines.append(f"[Ignored] {text}")
 
-        # 迴圈結束，存最後一筆
         if current_case["case_info"]:
             cases.append(current_case)
             
@@ -195,10 +194,6 @@ with st.sidebar:
     if word_file and st.button("🔄 開始智能整合", type="primary"):
         extracted_cases, raw_lines = parse_word_file(word_file)
         
-        # Debug 資訊
-        with st.expander("🔍 檢查 Word 解析邏輯 (Debug)", expanded=False):
-            st.text("\n".join(raw_lines))
-        
         # 讀取 PDF
         pdf_file_map = {}
         if pdf_files:
@@ -206,36 +201,41 @@ with st.sidebar:
                 clean_name = re.sub(r'[^a-zA-Z0-9]', '', pdf.name.rsplit('.', 1)[0])
                 pdf_file_map[clean_name] = pdf.read()
 
-        # 配對
         match_count = 0
         
-        with st.spinner("正在處理..."):
+        with st.spinner("正在搜尋圖片..."):
             for case in extracted_cases:
                 case_key = case["raw_case_no"]
                 target_fig = case["rep_fig_text"]
                 
                 matched_pdf_bytes = None
+                matched_pdf_name = ""
                 
+                # 尋找對應 PDF
                 for pdf_key, pdf_bytes in pdf_file_map.items():
                     if case_key and ((pdf_key.lower() in case_key.lower()) or (case_key.lower() in pdf_key.lower())):
                         if len(case_key) > 4: 
                             matched_pdf_bytes = pdf_bytes
+                            matched_pdf_name = pdf_key
                             break
                 
                 if matched_pdf_bytes and target_fig:
-                    img_data = extract_specific_figure_from_pdf(matched_pdf_bytes, target_fig)
+                    img_data, log_msg = extract_specific_figure_from_pdf(matched_pdf_bytes, target_fig)
                     if img_data:
                         case["image_data"] = img_data
-                        case["image_name"] = f"成功截取: {target_fig}"
+                        case["image_name"] = f"截取成功 ({matched_pdf_name})"
                         match_count += 1
                     else:
-                        case["image_name"] = f"找不到圖"
+                        case["image_name"] = f"找不到圖 ({log_msg})"
                 else:
-                    case["image_name"] = "無對應資料"
+                    if not matched_pdf_bytes:
+                        case["image_name"] = "無對應 PDF"
+                    else:
+                        case["image_name"] = "Word 無代表圖資訊"
 
         if extracted_cases:
             st.session_state['slides_data'].extend(extracted_cases)
-            st.success(f"處理完成！共 {len(extracted_cases)} 筆。")
+            st.success(f"處理完成！共 {len(extracted_cases)} 筆，截取 {match_count} 張圖。")
         else:
             st.warning("Word 解析無資料。")
 
@@ -247,7 +247,7 @@ with st.sidebar:
 
 # --- 主畫面 ---
 if not st.session_state['slides_data']:
-    st.info("👈 請上傳檔案。")
+    st.info("👈 請上傳檔案。此版本能自動從長篇說明中抓取「FIG. 3E」作為搜圖關鍵字。")
 else:
     st.subheader(f"📋 預覽")
     cols = st.columns(3)
@@ -262,7 +262,7 @@ else:
                 else:
                     # 顯示文字內容
                     display_text = data['rep_fig_text'] if data['rep_fig_text'].strip() else "(Word中無代表圖資訊)"
-                    st.info(f"無圖片，將填入：\n{display_text}")
+                    st.warning(f"無圖片 ({data['image_name']})，將填入文字：\n{display_text[:50]}...")
                 
                 st.caption(f"重點：{data['key_point']}")
 
@@ -360,6 +360,6 @@ else:
         st.download_button(
             label="📥 下載 PPT",
             data=binary_output,
-            file_name="fixed_logic_slides.pptx",
+            file_name="smart_figure_search_slides.pptx",
             mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
         )
