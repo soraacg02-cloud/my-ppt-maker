@@ -3,3 +3,6 @@ requests
 Pillow
 python-pptx
 python-docx
+pymupdf
+pandas
+streamlit-copy-to-clipboard
