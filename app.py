@@ -15,9 +15,9 @@ import re
 import pandas as pd
 
 # --- 設定網頁標題 ---
-st.set_page_config(page_title="PPT 重組生成器 (排版優化版)", page_icon="📑", layout="wide")
-st.title("📑 PPT 重組生成器 (排版優化版)")
-st.caption("修正：左上角資訊條列式排版、消除 Claim 空白頁、保留縮排格式。")
+st.set_page_config(page_title="PPT 重組生成器 (顯示修正版)", page_icon="📑", layout="wide")
+st.title("📑 PPT 重組生成器 (完整顯示版)")
+st.caption("修正：左上角資訊完整顯示、修正多餘的空白 Claim 頁面。")
 
 # === NBLM 提示詞區塊 ===
 nblm_prompt = """根據上傳的所有來源，分開整理出以下重點(不要表格)：
@@ -233,19 +233,14 @@ def parse_word_file(uploaded_docx):
         st.error(f"解析 Word 錯誤 ({uploaded_docx.name}): {e}")
         return []
 
-# --- 輔助函數：分割 Claim (修正：過濾空資料以消除空白頁) ---
+# --- 輔助函數：分割 Claim (修正：嚴格過濾空白頁) ---
 def split_claims_text(full_text):
-    """
-    分割依據：(Claim 數字) 或 Claim 數字 或 獨立項 數字。
-    同時過濾無效的空行chunk，解決空白頁問題。
-    """
     if not full_text: return []
     
     lines = full_text.split('\n')
     claims = []
     current_chunk = []
     
-    # 判斷新分頁的關鍵字
     header_pattern = re.compile(r'(\(Claim\s*\d+\)|Claim\s*\d+|獨立項\s*\d+)', re.IGNORECASE)
     
     for line in lines:
@@ -259,12 +254,13 @@ def split_claims_text(full_text):
     if current_chunk:
         claims.append(current_chunk)
     
-    # === 關鍵修正：過濾掉只包含空白或換行的組 ===
+    # === 關鍵修正：檢查每一組內容是否包含有效文字 ===
     valid_claims = []
     for chunk in claims:
-        # 檢查該組內容是否有實際文字
-        has_text = any(line.strip() for line in chunk)
-        if has_text:
+        # 將該組所有文字接起來，檢查是否為空
+        chunk_str = "".join(chunk).strip()
+        # 只有當內容長度大於 1 (避免只剩下標點或空白) 才視為有效頁面
+        if len(chunk_str) > 1:
             valid_claims.append(chunk)
             
     return valid_claims
@@ -355,7 +351,7 @@ else:
                 full_claim_text = data['claim_text']
                 claims_preview = split_claims_text(full_claim_text)
                 count_claims = len(claims_preview) if full_claim_text else 0
-                st.caption(f"Claim: {count_claims} 組 (預計 {count_claims} 頁)")
+                st.caption(f"Claim: {count_claims} 組")
 
     # --- PPT 生成邏輯 ---
     def generate_ppt(slides_data, need_claim_slide):
@@ -364,18 +360,16 @@ else:
         prs.slide_height = Inches(7.5)
         
         for data in slides_data:
-            # === 第一頁：原本的內容 ===
+            # === 第一頁 ===
             slide = prs.slides.add_slide(prs.slide_layouts[6])
             
-            # 左上：案號 (修正：只顯示內容，忽略 "1. 案號..." 標題行)
+            # 左上：案號 (修正：完全不隱藏，忠實顯示所有行)
             left, top, width, height = Inches(0.5), Inches(0.5), Inches(5.0), Inches(2.0)
             txBox = slide.shapes.add_textbox(left, top, width, height)
             tf = txBox.text_frame; tf.word_wrap = True
             
             for line in data['case_info'].split('\n'):
-                # 簡單過濾：如果該行包含 "1. 案號" 這種標題，就跳過不印
-                if "1. 案號" in line or "案號 / 日期" in line:
-                    continue
+                # 這裡刪除了之前的過濾邏輯，現在會顯示所有資訊
                 if line.strip():
                     p = tf.add_paragraph(); p.text = line.strip(); p.font.size = Pt(20); p.font.bold = True
 
@@ -404,31 +398,27 @@ else:
             p = shape.text_frame.paragraphs[0]; p.text = data['key_point']; p.alignment = PP_ALIGN.CENTER; p.font.size = Pt(20); p.font.bold = True
             shape.text_frame.vertical_anchor = MSO_SHAPE.RECTANGLE
 
-            # === Claim 分頁邏輯 (如果勾選) ===
+            # === Claim 分頁邏輯 ===
             if need_claim_slide:
                 claims_groups = split_claims_text(data['claim_text'])
                 
-                # 如果沒有分出任何組 (但也沒資料)，就不產生頁面，或產生一頁空
-                if not claims_groups and data['claim_text']:
+                # 如果沒有分出任何組，但 word 裡沒有文字，就不產生頁面 (不會跑進迴圈)
+                # 如果 word 裡有文字但沒分組，就整塊當一頁
+                if not claims_groups and data['claim_text'].strip():
                      claims_groups = [data['claim_text'].split('\n')]
-                elif not claims_groups:
-                     # 真的沒資料，略過
-                     pass
 
                 for claim_lines in claims_groups:
                     slide_c = prs.slides.add_slide(prs.slide_layouts[6])
                     
-                    # 2.1 左上：案號 (同樣應用過濾邏輯)
+                    # 2.1 左上：案號
                     left, top, width, height = Inches(0.5), Inches(0.5), Inches(5.0), Inches(2.0)
                     txBox = slide_c.shapes.add_textbox(left, top, width, height)
                     tf = txBox.text_frame; tf.word_wrap = True
                     for line in data['case_info'].split('\n'):
-                        if "1. 案號" in line or "案號 / 日期" in line:
-                            continue
                         if line.strip():
                             p = tf.add_paragraph(); p.text = line.strip(); p.font.size = Pt(20); p.font.bold = True
                     
-                    # 2.2 中間：Claim 內容 (保留縮排)
+                    # 2.2 中間：Claim 內容
                     left, top, width, height = Inches(0.5), Inches(2.5), Inches(12.3), Inches(4.5)
                     txBox = slide_c.shapes.add_textbox(left, top, width, height)
                     tf = txBox.text_frame; tf.word_wrap = True
@@ -446,17 +436,13 @@ else:
                             p.font.size = Pt(14) 
                             p.space_after = Pt(4)
                             
-                            # 縮排判斷
                             if line.startswith('\t') or line.startswith('    '):
                                 p.level = 1
                             elif clean_line.startswith(('o ', '○', '-', '•', '●')):
                                 p.level = 1
                             elif clean_line.startswith(('▪', '■')):
                                 p.level = 2
-                            # 嘗試偵測 "1." 或 "(1)" 這種子項目
                             elif clean_line[0].isdigit() or clean_line.startswith('('):
-                                # 如果這一行是 Claim 標題 (Claim 1)，則 level 0
-                                # 否則視為內文子項目 level 1
                                 if "Claim" in clean_line or "獨立項" in clean_line:
                                     p.level = 0
                                     p.font.bold = True
